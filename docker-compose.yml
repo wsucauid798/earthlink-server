@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: earthlink
+      POSTGRES_PASSWORD: earthlink
+      POSTGRES_DB: earthlink
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U earthlink"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      EARTHLINK_DB_HOST: db
+      EARTHLINK_DB_PORT: 5432
+      EARTHLINK_DB_USER: earthlink
+      EARTHLINK_DB_PASSWORD: earthlink
+      EARTHLINK_DB_NAME: earthlink
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - app-data:/app/data
+
+volumes:
+  pgdata:
+  app-data:
