@@ -1,5 +1,5 @@
 """
-Compute astronomy data (sunrise, sunset, day length, moon phase) for UK locations
+Compute astronomy data (sunrise, sunset, day length) for UK locations
 and insert into PostgreSQL.
 
 Uses astronomical algorithms to compute these values from coordinates and date.
@@ -11,7 +11,7 @@ Based on NOAA solar calculator algorithms and Jean Meeus' "Astronomical Algorith
 import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
-from math import acos, asin, atan2, cos, degrees, fmod, pi, radians, sin, tan
+from math import acos, asin, atan2, cos, degrees, fmod, pi, radians, sin
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,22 +98,6 @@ def sunrise_sunset(lat: float, lng: float, d: date) -> tuple[datetime | None, da
     return sunrise, sunset
 
 
-def moon_phase(d: date) -> float:
-    """
-    Calculate approximate moon phase.
-    Returns 0.0 = new moon, 0.25 = first quarter, 0.5 = full moon, 0.75 = last quarter.
-    Based on a simplified lunation cycle (29.53059 days).
-    """
-    # Known new moon reference: January 6, 2000 (Julian)
-    ref_new_moon = date(2000, 1, 6)
-    days_since = (d - ref_new_moon).days
-    lunation = 29.53059
-    phase = fmod(days_since / lunation, 1.0)
-    if phase < 0:
-        phase += 1.0
-    return round(phase, 4)
-
-
 async def get_representative_locations(session: AsyncSession, max_locations: int = 50) -> list[Location]:
     """Select the same representative locations used for weather data."""
     result = await session.execute(
@@ -177,7 +161,6 @@ async def run():
                     sunrise=rise,
                     sunset=sett,
                     day_length_hours=day_length,
-                    moon_phase=moon_phase(d),
                 ))
 
             session.add_all(rows)

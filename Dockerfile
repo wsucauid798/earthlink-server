@@ -11,15 +11,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy all application code first (source needed for editable-style install)
-COPY . .
+# Copy dependency definition first — this layer is cached until pyproject.toml changes.
+# Code changes don't trigger a full dependency reinstall (torch alone is 915MB).
+COPY pyproject.toml .
 
-# Install Python package and all dependencies
+# Create a minimal stub so pip can resolve the package metadata without full source.
+RUN mkdir -p src/world src/db src/api src/data_acquisition src/agents src/adapters && \
+    touch src/world/__init__.py src/db/__init__.py src/api/__init__.py \
+          src/data_acquisition/__init__.py src/agents/__init__.py src/adapters/__init__.py
+
+# Install all dependencies (cached as long as pyproject.toml is unchanged)
 RUN pip install --no-cache-dir .
+
+# Now copy the actual application code — only this layer rebuilds on code changes
+COPY . .
 
 # Create data directory for cached downloads
 RUN mkdir -p /app/data
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--app-dir", "src", "--host", "0.0.0.0", "--port", "8000"]

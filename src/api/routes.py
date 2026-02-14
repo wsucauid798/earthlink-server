@@ -3,6 +3,9 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from api.schemas import (
+    AgentAnswerSchema,
+    AgentDetailSchema,
+    AgentSummarySchema,
     AstronomySchema,
     LocationSchema,
     NearbyLocationSchema,
@@ -49,6 +52,47 @@ async def get_world_state():
     return world.get_state_summary()
 
 
+# --- Agents ---
+
+@router.get("/agents", response_model=list[AgentSummarySchema])
+async def list_agents(
+    search: str | None = Query(None, description="Search by agent name or ID (case-insensitive partial match)"),
+    limit: int = Query(100, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    """List autonomous agents with current state and learning progress."""
+    world = get_world()
+    agents = world.list_agents()
+
+    if search:
+        search_lower = search.lower()
+        agents = [a for a in agents if search_lower in a["name"].lower() or search_lower in a["id"].lower()]
+
+    total = len(agents)
+    agents = agents[offset : offset + limit]
+    return agents
+
+
+@router.get("/agents/{agent_id}", response_model=AgentDetailSchema)
+async def get_agent(agent_id: str):
+    """Get detailed state and learned knowledge for an autonomous agent."""
+    world = get_world()
+    agent = world.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return agent
+
+
+@router.get("/agents/{agent_id}/ask", response_model=AgentAnswerSchema)
+async def ask_agent(agent_id: str, question: str = Query(..., min_length=1, description="Question to ask the agent")):
+    """Ask an agent a direct question and receive a memory-grounded answer."""
+    world = get_world()
+    answer = world.ask_agent(agent_id, question)
+    if not answer:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return answer
+
+
 # --- Locations ---
 
 @router.get("/locations", response_model=list[LocationSchema])
@@ -84,6 +128,29 @@ async def list_locations(
         )
         for loc in locations
     ]
+
+
+@router.get("/locations/geojson")
+async def get_locations_geojson():
+    """All locations as a GeoJSON FeatureCollection — for map rendering."""
+    world = get_world()
+    features = []
+    for loc in world.geography.locations.values():
+        features.append({
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [loc.lng, loc.lat],
+            },
+            "properties": {
+                "id": loc.id,
+                "name": loc.name,
+                "type": loc.type,
+                "population": loc.population or 0,
+                "admin_level_2": loc.admin_level_2 or "",
+            },
+        })
+    return {"type": "FeatureCollection", "features": features}
 
 
 @router.get("/locations/{location_id}", response_model=LocationSchema)
@@ -172,7 +239,6 @@ async def get_astronomy(location_id: int):
         sunrise=astro.sunrise.isoformat() if astro.sunrise else None,
         sunset=astro.sunset.isoformat() if astro.sunset else None,
         day_length_hours=astro.day_length_hours,
-        moon_phase=astro.moon_phase,
         is_daylight=astro.is_daylight,
     )
 
@@ -208,14 +274,14 @@ async def control_simulation(control: SimulationControlSchema):
 
 @router.post("/simulation/config")
 async def configure_simulation(config: SimulationConfigSchema):
-    """Update simulation parameters."""
+    """Update simulation parameters (tick interval)."""
     world = get_world()
 
     if config.tick_interval_seconds is not None:
         world.config.tick_interval_seconds = config.tick_interval_seconds
-    if config.time_scale_minutes is not None:
-        from datetime import timedelta
-        world.config.time_scale_minutes = config.time_scale_minutes
-        world.time.time_step = timedelta(minutes=config.time_scale_minutes)
 
-    return {"status": "configured", "config": world.config.model_dump()}
+    return {
+        "status": "configured",
+        "config": world.config.model_dump(),
+        "time": world.time.to_dict(),
+    }

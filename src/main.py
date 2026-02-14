@@ -25,6 +25,8 @@ async def lifespan(app: FastAPI):
     await world.load()
     world.on_tick(on_tick)
     set_world(world)
+    if not world.is_running:
+        await world.start()
 
     logger.info("EarthLink server ready")
 
@@ -33,6 +35,16 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if world.is_running:
         await world.pause()
+    if world.earth_proxy:
+        await world.earth_proxy.disconnect_redis()
+    # Shut down Ray if it was initialised
+    try:
+        import ray
+        if ray.is_initialized():
+            ray.shutdown()
+            logger.info("Ray shut down")
+    except ImportError:
+        pass
     await dispose_engine()
 
 

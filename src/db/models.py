@@ -93,7 +93,6 @@ class AstronomyData(Base):
     sunrise = Column(DateTime, nullable=True)
     sunset = Column(DateTime, nullable=True)
     day_length_hours = Column(Float, nullable=True)
-    moon_phase = Column(Float, nullable=True)  # 0.0 = new moon, 0.5 = full moon, 1.0 = new moon
 
     # Relationships
     location = relationship("Location", back_populates="astronomy_data")
@@ -106,3 +105,22 @@ class WorldState(Base):
     current_time = Column(DateTime, nullable=False, default=datetime.utcnow)
     tick_count = Column(Integer, nullable=False, default=0)
     is_running = Column(Boolean, nullable=False, default=False)
+
+
+class AgentState(Base):
+    __tablename__ = "agent_state"
+
+    id = Column(String(32), primary_key=True)
+    name = Column(String(255), nullable=False)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=False, index=True)
+    energy = Column(Float, nullable=False, default=100.0)
+    last_move_distance_km = Column(Float, nullable=False, default=0.0)
+    last_action = Column(String(255), nullable=False, default="spawned")
+
+    learning_rate = Column(Float, nullable=False)
+    exploration_bias = Column(Float, nullable=False)
+    risk_tolerance = Column(Float, nullable=False)
+    stamina = Column(Float, nullable=False)
+    comfort_temperature_c = Column(Float, nullable=False)
+
+    knowledge = Column(JSONB, nullable=False, default=dict)

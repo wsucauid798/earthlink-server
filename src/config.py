@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Database
+    # Database (PostgreSQL — world state: geography, weather, positions)
     db_host: str = "localhost"
     db_port: int = 5432
     db_user: str = "earthlink"
@@ -15,6 +15,13 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    # Redis (ephemeral proxy cache — civilisation content with TTL)
+    redis_url: str = "redis://localhost:6379/0"
+
+    # Chroma (vector DB — agent semantic memory retrieval)
+    chroma_host: str = "localhost"
+    chroma_port: int = 8001
 
     # Server
     host: str = "0.0.0.0"

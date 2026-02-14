@@ -13,6 +13,12 @@ dependencies = [
     "asyncpg>=0.30.0",
     "alembic>=1.14.0",
     "websockets>=13.0",
+    "redis>=5.0.0",
+    "chromadb-client>=1.0.0",
+    "ray>=2.40.0",
+    "sentence-transformers>=3.0.0",
+    "numpy>=1.26.0",
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +29,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["world", "db", "api", "data_acquisition"]
+packages = ["src/world", "src/db", "src/api", "src/data_acquisition", "src/agents", "src/adapters"]
 
 [build-system]
 requires = ["hatchling"]

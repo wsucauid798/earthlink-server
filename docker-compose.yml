@@ -15,7 +15,38 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  chroma:
+    image: chromadb/chroma:0.6.3
+    ports:
+      - "8001:8000"
+    volumes:
+      - chromadata:/chroma/chroma
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma
+      ANONYMIZED_TELEMETRY: "FALSE"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v2/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   server:
+    container_name: earthlink-server
+    image: earthlink-server
     build: .
     ports:
       - "8000:8000"
@@ -25,12 +56,21 @@ services:
       EARTHLINK_DB_USER: earthlink
       EARTHLINK_DB_PASSWORD: earthlink
       EARTHLINK_DB_NAME: earthlink
+      EARTHLINK_REDIS_URL: redis://redis:6379/0
+      EARTHLINK_CHROMA_HOST: chroma
+      EARTHLINK_CHROMA_PORT: 8000
     depends_on:
       db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma:
         condition: service_healthy
     volumes:
       - app-data:/app/data
 
 volumes:
   pgdata:
+  redisdata:
+  chromadata:
   app-data:
