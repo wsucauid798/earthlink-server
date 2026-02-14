@@ -1,8 +1,8 @@
 FROM python:3.13-slim
 
 LABEL org.opencontainers.image.title="earthlink-server"
-LABEL org.opencontainers.image.version="0.0.1"
-LABEL org.opencontainers.image.description="A symbolic virtual world — the United Kingdom, built from real Earth data"
+LABEL org.opencontainers.image.version="0.0.2"
+LABEL org.opencontainers.image.description="A symbolic virtual world — built from real Earth data"
 
 WORKDIR /app
 
@@ -11,23 +11,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency definition first — this layer is cached until pyproject.toml changes.
-# Code changes don't trigger a full dependency reinstall (torch alone is 915MB).
+# --- Dependency installation (strong cache) ---
+# Extract only the dependency list from pyproject.toml into requirements.txt.
+# Metadata changes (version, description) do NOT bust the pip cache —
+# only adding/removing/changing an actual dependency triggers a reinstall.
 COPY pyproject.toml .
+RUN python -c "\
+import tomllib, pathlib; \
+data = tomllib.loads(pathlib.Path('pyproject.toml').read_text()); \
+deps = data.get('project', {}).get('dependencies', []); \
+pathlib.Path('requirements.txt').write_text('\n'.join(deps) + '\n')"
 
-# Create a minimal stub so pip can resolve the package metadata without full source.
+# This layer only rebuilds when the actual dependency list changes
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+# Install the project itself (no deps — they're already installed above)
 RUN mkdir -p src/world src/db src/api src/data_acquisition src/agents src/adapters && \
     touch src/world/__init__.py src/db/__init__.py src/api/__init__.py \
           src/data_acquisition/__init__.py src/agents/__init__.py src/adapters/__init__.py
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps .
 
-# Install all dependencies (cached as long as pyproject.toml is unchanged)
-RUN pip install --no-cache-dir .
-
-# Now copy the actual application code — only this layer rebuilds on code changes
-COPY . .
+# Copy only what the app needs at runtime — nothing else enters the image.
+# .dockerignore uses a whitelist (starts with *) so this is safe with COPY . .
+# but we're explicit here for clarity.
+COPY src/ src/
+COPY alembic.ini .
 
 # Create data directory for cached downloads
 RUN mkdir -p /app/data
+
+# Ensure src/ is on PYTHONPATH for all processes (uvicorn, Ray workers, etc.)
+ENV PYTHONPATH=/app/src
 
 EXPOSE 8000
 

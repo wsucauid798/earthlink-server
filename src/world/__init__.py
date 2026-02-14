@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 class World:
     """
-    The virtual world. It exists. It ticks. It is the United Kingdom.
+    The virtual world. It exists. It ticks. It is Earth.
 
     The world loads its state from real data in the database, advances
     through time, and updates weather — all independently. It doesn't

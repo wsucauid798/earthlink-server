@@ -102,7 +102,7 @@ class OllamaAdapter(EarthAdapter):
 
     @staticmethod
     def _build_prompt(query: str, location_name: str | None) -> str:
-        context = f" about {location_name} in the United Kingdom" if location_name else ""
+        context = f" about {location_name}" if location_name else ""
         return (
             f"You are a knowledgeable reference source{context}. "
             f"Answer concisely and factually in 2-3 sentences. "

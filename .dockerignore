@@ -1,12 +1,12 @@
-__pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-.eggs/
-*.egg
-.env
-.venv/
-venv/
-data/
+# Exclude everything by default — whitelist what the container needs.
+# This is the rule: if it's not listed below, it doesn't go in.
+*
+
+# Source code
+!src/
+
+# Dependency definition (needed for pip install)
+!pyproject.toml
+
+# Alembic config + migrations (needed for DB migrations at runtime)
+!alembic.ini

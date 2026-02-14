@@ -67,7 +67,7 @@ WMO_CODES = {
 async def get_representative_locations(session: AsyncSession, max_locations: int = 50) -> list[Location]:
     """
     Select representative locations for weather data.
-    Picks major cities/towns spread across the UK to give good coverage.
+    Picks major cities/towns spread across the loaded geography to give good coverage.
     """
     result = await session.execute(
         select(Location)

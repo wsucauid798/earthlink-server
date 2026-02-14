@@ -1107,24 +1107,54 @@ class AgentSystem:
 
     # --- Ray lifecycle -----------------------------------------------------
 
+    # Minimum agent count to justify Ray overhead (workers load PyTorch each).
+    # Below this threshold, sequential mode is faster and far lighter on memory.
+    RAY_MIN_AGENTS = 10
+
     def init_ray(self, seed: int = 42) -> bool:
-        """Create a Ray actor for each agent. Returns True if Ray mode activated."""
+        """Create a Ray actor for each agent. Returns True if Ray mode activated.
+
+        Skipped when:
+        - Ray is not installed
+        - EARTHLINK_DISABLE_RAY=1 is set (e.g. in Docker where memory is tight)
+        - Agent count is below RAY_MIN_AGENTS (overhead > benefit)
+        """
+        import os
+
+        if os.environ.get("EARTHLINK_DISABLE_RAY", "").strip() in ("1", "true", "yes"):
+            logger.info("Ray disabled via EARTHLINK_DISABLE_RAY — sequential mode")
+            return False
+
         from .actor import RAY_AVAILABLE, AgentActor
 
         if not RAY_AVAILABLE or AgentActor is None:
             logger.info("Ray not available — staying in sequential mode")
             return False
 
+        if len(self.agents) < self.RAY_MIN_AGENTS:
+            logger.info(
+                f"Only {len(self.agents)} agents (< {self.RAY_MIN_AGENTS}) — "
+                f"sequential mode is more efficient than Ray"
+            )
+            return False
+
         try:
             import ray as _ray
+            import multiprocessing
 
             if not _ray.is_initialized():
+                # Limit Ray to half the available CPUs (min 2) so it doesn't
+                # saturate the machine.  Override with RAY_NUM_CPUS env var.
+                default_cpus = max(2, multiprocessing.cpu_count() // 2)
+                num_cpus = int(os.environ.get("RAY_NUM_CPUS", str(default_cpus)))
                 _ray.init(
+                    num_cpus=num_cpus,
                     ignore_reinit_error=True,
                     logging_level=logging.WARNING,
                 )
                 logger.info(
-                    f"Ray initialised: {_ray.cluster_resources().get('CPU', '?')} CPUs, "
+                    f"Ray initialised: {num_cpus} CPUs allocated "
+                    f"(of {multiprocessing.cpu_count()} available), "
                     f"{_ray.cluster_resources().get('GPU', 0)} GPUs"
                 )
 

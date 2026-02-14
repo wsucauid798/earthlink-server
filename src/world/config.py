@@ -28,7 +28,7 @@ class WorldConfig(BaseModel):
 
     The world IS Earth. Time is always real Earth time — there is no
     simulated clock, no alternative era, no fast-forward. The world's
-    clock is the UK clock.
+    clock is the Earth clock.
     """
 
     # Time

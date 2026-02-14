@@ -194,6 +194,8 @@ class _AgentActorImpl:
 # ---------------------------------------------------------------------------
 
 if RAY_AVAILABLE:
-    AgentActor = ray.remote(_AgentActorImpl)
+    # Each actor gets a tiny CPU slice — agents are lightweight compute.
+    # This lets hundreds of actors coexist without each claiming a full core.
+    AgentActor = ray.remote(num_cpus=0.01)(_AgentActorImpl)
 else:
     AgentActor = None

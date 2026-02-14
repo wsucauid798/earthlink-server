@@ -94,6 +94,30 @@ async def ask_agent(agent_id: str, question: str = Query(..., min_length=1, desc
 
 
 # --- Locations ---
+# Define /locations/geojson BEFORE /locations/{location_id} so "geojson" is not parsed as location_id (422).
+
+@router.get("/locations/geojson")
+async def get_locations_geojson():
+    """All locations as a GeoJSON FeatureCollection — for map rendering."""
+    world = get_world()
+    features = []
+    for loc in world.geography.locations.values():
+        features.append({
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [loc.lng, loc.lat],
+            },
+            "properties": {
+                "id": loc.id,
+                "name": loc.name,
+                "type": loc.type,
+                "population": loc.population or 0,
+                "admin_level_2": loc.admin_level_2 or "",
+            },
+        })
+    return {"type": "FeatureCollection", "features": features}
+
 
 @router.get("/locations", response_model=list[LocationSchema])
 async def list_locations(
@@ -128,29 +152,6 @@ async def list_locations(
         )
         for loc in locations
     ]
-
-
-@router.get("/locations/geojson")
-async def get_locations_geojson():
-    """All locations as a GeoJSON FeatureCollection — for map rendering."""
-    world = get_world()
-    features = []
-    for loc in world.geography.locations.values():
-        features.append({
-            "type": "Feature",
-            "geometry": {
-                "type": "Point",
-                "coordinates": [loc.lng, loc.lat],
-            },
-            "properties": {
-                "id": loc.id,
-                "name": loc.name,
-                "type": loc.type,
-                "population": loc.population or 0,
-                "admin_level_2": loc.admin_level_2 or "",
-            },
-        })
-    return {"type": "FeatureCollection", "features": features}
 
 
 @router.get("/locations/{location_id}", response_model=LocationSchema)

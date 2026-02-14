@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="EarthLink Server",
-    description="A symbolic virtual world — the United Kingdom, built from real Earth data",
+    description="A symbolic virtual world — built from real Earth data",
     version="0.0.2",
     lifespan=lifespan,
 )

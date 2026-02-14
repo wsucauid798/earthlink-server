@@ -132,7 +132,7 @@ class EarthProxy:
             return []
 
         all_facts: list[EarthFact] = []
-        query = f"{location_name} United Kingdom"
+        query = location_name
 
         for adapter in self.adapters:
             try:

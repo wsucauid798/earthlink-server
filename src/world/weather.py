@@ -3,7 +3,7 @@
 Weather comes from Open-Meteo. On startup, historical data from the
 database provides the initial state. A background scheduler then
 periodically fetches live current conditions so the world's weather
-matches what is actually happening in the UK right now.
+matches what is actually happening on Earth right now.
 """
 
 import logging
