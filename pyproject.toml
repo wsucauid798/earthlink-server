@@ -1,6 +1,6 @@
 [project]
 name = "earthlink-server"
-version = "0.0.1"
+version = "0.0.2"
 description = "A symbolic virtual world server — the United Kingdom, built from real Earth data"
 requires-python = ">=3.12"
 dependencies = [

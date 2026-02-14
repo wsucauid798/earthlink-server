@@ -5,7 +5,7 @@ Bootstraps geography, weather, and time from the database.
 Ticks forward independently. Knows nothing about agents.
 """
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import asyncio
 import logging
