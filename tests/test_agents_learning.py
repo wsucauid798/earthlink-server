@@ -182,7 +182,7 @@ def test_social_learning_shares_high_value_action_when_agents_meet():
     a1.knowledge.q_values = {1: {2: 2.0}}
     a2.knowledge.q_values = {1: {2: 0.0}}
 
-    system._social_learn()
+    system._social_learn(geography=geography)
 
     assert a2.knowledge.q_values[1][2] > 0.0
 
@@ -204,7 +204,7 @@ def test_social_learning_exchanges_facts_between_colocated_agents():
     a1._append_fact("population", "Population of L2 is 1200.", 2, value=1200)
     assert not any("Population of L2 is 1200." in str(f.get("text", "")) for f in a2.knowledge.facts)
 
-    system._social_learn()
+    system._social_learn(geography=geography)
 
     assert any("Population of L2 is 1200." in str(f.get("text", "")) for f in a2.knowledge.facts)
     assert a2.knowledge.beliefs["population:2"]["value"] == 1200
@@ -237,7 +237,7 @@ def test_social_belief_merge_uses_confidence_weighting():
     a1._append_fact("population", "Population of L2 is 1200.", 2, value=1200)
     a1.knowledge.beliefs["population:2"]["confidence"] = 0.45
 
-    system._social_learn()
+    system._social_learn(geography=geography)
 
     assert a2.knowledge.beliefs["population:2"]["value"] == 1000
 
@@ -257,7 +257,7 @@ def test_social_dialogue_records_messages_between_colocated_agents():
     a2.location_id = 1
     a1._append_fact("population", "Population of L2 is 1200.", 2, value=1200)
 
-    system._social_learn(tick_count=7, sim_time=datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc))
+    system._social_learn(geography=geography, tick_count=7, sim_time=datetime(2025, 1, 1, 12, 0, tzinfo=timezone.utc))
 
     assert len(a1.knowledge.dialogue_events) > 0
     assert len(a2.knowledge.dialogue_events) > 0
@@ -284,7 +284,7 @@ def test_listener_learns_from_dialogue_messages():
     a1._append_fact("population", "Population of L2 is 1200.", 2, value=1200)
     assert not any("Population of L2 is 1200." in str(f.get("text", "")) for f in a2.knowledge.facts)
 
-    system._social_learn(tick_count=8, sim_time=datetime(2025, 1, 1, 12, 5, tzinfo=timezone.utc))
+    system._social_learn(geography=geography, tick_count=8, sim_time=datetime(2025, 1, 1, 12, 5, tzinfo=timezone.utc))
 
     learned = [f for f in a2.knowledge.facts if str(f.get("source")) == "dialogue"]
     assert learned
@@ -529,3 +529,147 @@ def test_investigate_gap_goal_biases_action_toward_gap_target():
     chosen = agent.choose_next_location(observation, geography, weather, random.Random(2))
 
     assert chosen == 2
+
+
+def test_agent_knowledge_serialization_with_new_fields():
+    """Test that AgentKnowledge serializes and deserializes correctly with A55-A59 fields."""
+    # Create knowledge with new fields populated
+    knowledge = AgentKnowledge(
+        visited_locations={1, 2, 3},
+        facts=[{"text": "test fact", "predicate": "test"}],
+        # A55/A56 - Conversations
+        active_conversations={
+            "conv_A1_A2_100": {
+                "participants": ["A1", "A2"],
+                "topic": "location:London",
+                "initiator": "A1",
+                "started_tick": 100,
+                "turn_count": 2,
+                "messages": [
+                    {"from": "A1", "text": "Tell me about London", "tick": 100},
+                    {"from": "A2", "text": "London is a capital city", "tick": 101},
+                ],
+                "status": "active",
+            }
+        },
+        conversation_history=[
+            {
+                "participants": ["A1", "A3"],
+                "topic": "weather",
+                "concluded_tick": 95,
+                "turn_count": 3,
+            }
+        ],
+        # A57/A58 - Teaching/Learning
+        teaching_events=[
+            {
+                "taught_agent": "A2",
+                "topic": "location:1",
+                "facts_taught": 3,
+                "tick": 50,
+                "effectiveness": 0.8,
+            }
+        ],
+        learning_requests=[
+            {
+                "from_agent": "A1",
+                "to_agent": "A3",
+                "topic": "predicate:weather",
+                "tick": 60,
+                "fulfilled": True,
+            }
+        ],
+        # A59 - Social network
+        interaction_network={
+            "A2": {
+                "interaction_count": 15,
+                "last_interaction_tick": 100,
+                "topics_discussed": {"weather": 5, "geography": 10},
+                "knowledge_quality": 0.85,
+                "centrality_score": 0.6,
+                "is_hub": False,
+            }
+        },
+    )
+
+    # Serialize
+    serialized = knowledge.to_dict()
+
+    # Verify new fields are in serialized dict
+    assert "active_conversations" in serialized
+    assert "conversation_history" in serialized
+    assert "teaching_events" in serialized
+    assert "learning_requests" in serialized
+    assert "interaction_network" in serialized
+
+    # Verify content
+    assert "conv_A1_A2_100" in serialized["active_conversations"]
+    assert len(serialized["conversation_history"]) == 1
+    assert len(serialized["teaching_events"]) == 1
+    assert len(serialized["learning_requests"]) == 1
+    assert "A2" in serialized["interaction_network"]
+
+    # Deserialize
+    restored = AgentKnowledge.from_dict(serialized)
+
+    # Verify new fields are restored
+    assert len(restored.active_conversations) == 1
+    assert "conv_A1_A2_100" in restored.active_conversations
+    assert restored.active_conversations["conv_A1_A2_100"]["topic"] == "location:London"
+    assert restored.active_conversations["conv_A1_A2_100"]["turn_count"] == 2
+
+    assert len(restored.conversation_history) == 1
+    assert restored.conversation_history[0]["topic"] == "weather"
+
+    assert len(restored.teaching_events) == 1
+    assert restored.teaching_events[0]["taught_agent"] == "A2"
+    assert restored.teaching_events[0]["effectiveness"] == 0.8
+
+    assert len(restored.learning_requests) == 1
+    assert restored.learning_requests[0]["from_agent"] == "A1"
+    assert restored.learning_requests[0]["fulfilled"] is True
+
+    assert len(restored.interaction_network) == 1
+    assert "A2" in restored.interaction_network
+    assert restored.interaction_network["A2"]["interaction_count"] == 15
+    assert restored.interaction_network["A2"]["is_hub"] is False
+
+
+def test_agent_knowledge_backward_compatibility():
+    """Test that old AgentKnowledge data (without new fields) deserializes correctly."""
+    # Simulate old data without new fields
+    old_data = {
+        "visited_locations": [1, 2],
+        "visit_counts": {"1": 3, "2": 1},
+        "location_scores": {"1": 1.5, "2": 0.8},
+        "condition_counts": {"clear": 5},
+        "q_values": {"1": {"2": 0.5}},
+        "facts": [{"text": "old fact", "predicate": "test"}],
+        "beliefs": {},
+        "belief_conflicts": [],
+        "episodic_events": [],
+        "dialogue_events": [],
+        "social_memory": {
+            "A2": {"name": "Agent 2", "trust": 0.7, "familiarity": 0.5}
+        },
+        "encounters": [],
+        # NOTE: No active_conversations, conversation_history, teaching_events,
+        # learning_requests, or interaction_network
+    }
+
+    # Deserialize old data
+    knowledge = AgentKnowledge.from_dict(old_data)
+
+    # Verify new fields exist with empty defaults
+    assert knowledge.active_conversations == {}
+    assert knowledge.conversation_history == []
+    assert knowledge.teaching_events == []
+    assert knowledge.learning_requests == []
+    assert knowledge.interaction_network == {}
+
+    # Verify old fields are intact
+    assert len(knowledge.visited_locations) == 2
+    assert 1 in knowledge.visited_locations
+    assert knowledge.visit_counts[1] == 3
+    assert "A2" in knowledge.social_memory
+    assert knowledge.social_memory["A2"]["trust"] == 0.7

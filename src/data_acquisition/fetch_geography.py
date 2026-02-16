@@ -1,8 +1,9 @@
 """
-Fetch UK geography data from GeoNames and insert into PostgreSQL.
+Fetch geography data from GeoNames and insert into PostgreSQL.
 
-Downloads GB.zip from GeoNames, parses the tab-delimited file, and populates
-the `locations` and `location_connections` tables with real UK places.
+Downloads country data files (GB.zip, IE.zip, etc.) from GeoNames, parses the
+tab-delimited files, and populates the `locations` and `location_connections`
+tables with real places.
 
 GeoNames data format (tab-delimited):
   0: geonameid, 1: name, 2: asciiname, 3: alternatenames, 4: latitude,
@@ -33,11 +34,18 @@ from db.models import Base, Location, LocationConnection
 
 logger = logging.getLogger(__name__)
 
-GEONAMES_GB_URL = "https://download.geonames.org/export/dump/GB.zip"
+# GeoNames country URLs (GB = UK, IE = Ireland)
+GEONAMES_URLS = {
+    "GB": "https://download.geonames.org/export/dump/GB.zip",
+    "IE": "https://download.geonames.org/export/dump/IE.zip",
+}
 ADMIN1_URL = "https://download.geonames.org/export/dump/admin1CodesASCII.txt"
 ADMIN2_URL = "https://download.geonames.org/export/dump/admin2Codes.txt"
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "geography"
+
+# Countries to fetch (can be configured)
+COUNTRIES_TO_FETCH = ["IE"]  # Only Ireland - GB already in database
 
 # Feature codes that represent meaningful locations for our world
 FEATURE_CLASSES_KEEP = {"A", "H", "L", "P", "R", "S", "T", "V"}
@@ -81,6 +89,17 @@ UK_NATIONS = {
     "NIR": "Northern Ireland",
 }
 
+# Ireland admin1 code mapping (26 counties in Republic, some consolidated)
+IE_COUNTIES = {
+    "01": "Carlow", "02": "Cavan", "03": "Clare", "04": "Cork",
+    "06": "Donegal", "07": "Dublin", "10": "Galway", "11": "Kerry",
+    "12": "Kildare", "13": "Kilkenny", "14": "Laois", "15": "Leitrim",
+    "16": "Limerick", "18": "Longford", "19": "Louth", "20": "Mayo",
+    "21": "Meath", "22": "Monaghan", "23": "Offaly", "24": "Roscommon",
+    "25": "Sligo", "26": "Tipperary", "27": "Waterford", "29": "Westmeath",
+    "30": "Wexford", "31": "Wicklow",
+}
+
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate the great-circle distance between two points on Earth in km."""
@@ -121,8 +140,8 @@ async def download_file(url: str, dest: Path) -> Path:
     return dest
 
 
-async def load_admin_codes() -> dict[str, str]:
-    """Download and parse admin1 and admin2 code files for GB."""
+async def load_admin_codes(country_codes: list[str]) -> dict[str, str]:
+    """Download and parse admin1 and admin2 code files for specified countries."""
     admin1_path = await download_file(ADMIN1_URL, DATA_DIR / "admin1CodesASCII.txt")
     admin2_path = await download_file(ADMIN2_URL, DATA_DIR / "admin2Codes.txt")
 
@@ -131,12 +150,16 @@ async def load_admin_codes() -> dict[str, str]:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split("\t")
-                if len(parts) >= 2 and parts[0].startswith("GB"):
-                    codes[parts[0]] = parts[1]
+                if len(parts) >= 2:
+                    # Filter for specified countries
+                    for country_code in country_codes:
+                        if parts[0].startswith(f"{country_code}."):
+                            codes[parts[0]] = parts[1]
+                            break
     return codes
 
 
-def parse_geonames_row(row: list[str], admin_codes: dict[str, str]) -> dict | None:
+def parse_geonames_row(row: list[str], admin_codes: dict[str, str], country_code: str) -> dict | None:
     """Parse a single GeoNames row into a location dict."""
     if len(row) < 19:
         return None
@@ -159,9 +182,19 @@ def parse_geonames_row(row: list[str], admin_codes: dict[str, str]) -> dict | No
     # Resolve type
     loc_type = FEATURE_CODE_TO_TYPE.get(feature_code, feature_class.lower())
 
-    # Resolve admin hierarchy
-    nation = UK_NATIONS.get(admin1, admin_codes.get(f"GB.{admin1}", admin1) if admin1 else None)
-    county = admin_codes.get(f"GB.{admin1}.{admin2}", admin2) if admin2 else None
+    # Resolve admin hierarchy based on country
+    if country_code == "GB":
+        country_name = "United Kingdom"
+        nation = UK_NATIONS.get(admin1, admin_codes.get(f"GB.{admin1}", admin1) if admin1 else None)
+        county = admin_codes.get(f"GB.{admin1}.{admin2}", admin2) if admin2 else None
+    elif country_code == "IE":
+        country_name = "Ireland"
+        nation = None  # Ireland doesn't have sub-national divisions like UK
+        county = IE_COUNTIES.get(admin1, admin_codes.get(f"IE.{admin1}", admin1) if admin1 else None)
+    else:
+        country_name = country_code
+        nation = admin_codes.get(f"{country_code}.{admin1}", admin1) if admin1 else None
+        county = admin_codes.get(f"{country_code}.{admin1}.{admin2}", admin2) if admin2 else None
 
     # Infer terrain from feature class and code
     terrain = None
@@ -184,7 +217,7 @@ def parse_geonames_row(row: list[str], admin_codes: dict[str, str]) -> dict | No
         "lng": lng,
         "elevation": elevation,
         "terrain": terrain,
-        "admin_level_1": "United Kingdom",
+        "admin_level_1": country_name,
         "admin_level_2": nation,
         "admin_level_3": county,
         "admin_level_4": None,
@@ -194,25 +227,29 @@ def parse_geonames_row(row: list[str], admin_codes: dict[str, str]) -> dict | No
             "feature_class": feature_class,
             "feature_code": feature_code,
             "asciiname": row[2],
+            "country_code": country_code,
         },
     }
 
 
-async def fetch_and_parse_geography() -> list[dict]:
-    """Download GB.zip and parse all locations."""
-    zip_path = await download_file(GEONAMES_GB_URL, DATA_DIR / "GB.zip")
-    admin_codes = await load_admin_codes()
+async def fetch_and_parse_geography(country_code: str, admin_codes: dict[str, str]) -> list[dict]:
+    """Download and parse geography data for a specific country."""
+    if country_code not in GEONAMES_URLS:
+        raise ValueError(f"Unsupported country code: {country_code}")
+
+    url = GEONAMES_URLS[country_code]
+    zip_path = await download_file(url, DATA_DIR / f"{country_code}.zip")
 
     locations = []
     with zipfile.ZipFile(zip_path, "r") as zf:
-        with zf.open("GB.txt") as f:
+        with zf.open(f"{country_code}.txt") as f:
             reader = csv.reader(io.TextIOWrapper(f, encoding="utf-8"), delimiter="\t")
             for row in reader:
-                loc = parse_geonames_row(row, admin_codes)
+                loc = parse_geonames_row(row, admin_codes, country_code)
                 if loc:
                     locations.append(loc)
 
-    logger.info(f"Parsed {len(locations)} UK locations from GeoNames")
+    logger.info(f"Parsed {len(locations)} locations from {country_code} GeoNames data")
     return locations
 
 
@@ -340,31 +377,52 @@ async def insert_connections(
 
 
 async def run():
-    """Main entry point: download, parse, and insert UK geography data."""
+    """Main entry point: download, parse, and insert geography data for configured countries."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
-    logger.info("=== Fetching UK Geography Data ===")
+    logger.info(f"=== Fetching Geography Data for {', '.join(COUNTRIES_TO_FETCH)} ===")
 
     # Ensure tables exist
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    # Clear existing data
+    # Check which countries already exist in database
     async with async_session() as session:
-        await session.execute(text("DELETE FROM location_connections"))
-        await session.execute(text("DELETE FROM locations"))
-        await session.commit()
-        logger.info("Cleared existing geography data")
+        result = await session.execute(
+            text("SELECT DISTINCT metadata->>'country_code' FROM locations WHERE metadata->>'country_code' IS NOT NULL")
+        )
+        existing_countries = {row[0] for row in result.fetchall()}
 
-    # Fetch and parse
-    locations = await fetch_and_parse_geography()
+    if existing_countries:
+        logger.info(f"Existing countries in database: {', '.join(sorted(existing_countries))}")
 
-    # Generate connections
-    connections = generate_connections(locations)
+    # Filter out countries already in database
+    countries_to_fetch = [c for c in COUNTRIES_TO_FETCH if c not in existing_countries]
+
+    if not countries_to_fetch:
+        logger.info("All requested countries already in database. Nothing to fetch.")
+        return
+
+    logger.info(f"Will fetch: {', '.join(countries_to_fetch)}")
+
+    # Load admin codes for countries we're actually fetching
+    admin_codes = await load_admin_codes(countries_to_fetch)
+
+    # Fetch and parse data for each country
+    all_locations = []
+    for country_code in countries_to_fetch:
+        logger.info(f"Fetching data for {country_code}...")
+        locations = await fetch_and_parse_geography(country_code, admin_codes)
+        all_locations.extend(locations)
+
+    logger.info(f"Total locations parsed: {len(all_locations)}")
+
+    # Generate connections across all locations
+    connections = generate_connections(all_locations)
 
     # Insert into database
     async with async_session() as session:
-        geoname_to_db_id = await insert_locations(session, locations)
+        geoname_to_db_id = await insert_locations(session, all_locations)
 
     async with async_session() as session:
         await insert_connections(session, connections, geoname_to_db_id)

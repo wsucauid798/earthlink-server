@@ -132,6 +132,7 @@ class _AgentActorImpl:
         agent = self._agent
         return {
             "agent_id": agent.agent_id,
+            "name": agent.name,
             "location_id": agent.location_id,
             "recent_facts": list(agent.knowledge.facts[-60:]),
             "recent_facts_texts_500": {
@@ -144,17 +145,31 @@ class _AgentActorImpl:
                 loc_id: dict(action_map)
                 for loc_id, action_map in agent.knowledge.q_values.items()
             },
+            "social_memory": {k: dict(v) for k, v in agent.knowledge.social_memory.items()},
+            # A55/A56 - Conversation state
+            "active_conversations": {k: dict(v) for k, v in agent.knowledge.active_conversations.items()},
+            # A57/A58 - Teaching/learning tracking (for effectiveness computation)
+            "teaching_events": list(agent.knowledge.teaching_events[-100:]),  # Recent 100
+            # A59 - Interaction network
+            "interaction_network": {k: dict(v) for k, v in agent.knowledge.interaction_network.items()},
         }
 
     def apply_social_update(self, update: dict) -> None:
         """Apply social learning updates computed by the coordinator.
 
         The update dict has keys:
-            new_facts:        list[dict] — facts to append
-            belief_updates:   dict[key, belief_dict] — beliefs to set/merge
-            belief_conflicts: list[dict] — conflicts to append
-            q_updates:        dict[location_id_str, dict[action_id_str, float]]
-            dialogue_events:  list[dict] — dialogue entries to append
+            new_facts:             list[dict] — facts to append
+            belief_updates:        dict[key, belief_dict] — beliefs to set/merge
+            belief_conflicts:      list[dict] — conflicts to append
+            q_updates:             dict[location_id_str, dict[action_id_str, float]]
+            dialogue_events:       list[dict] — dialogue entries to append
+            social_memory:         dict[agent_id, record] — social memory to merge
+            encounters:            list[dict] — encounter events to append
+            active_conversations:  dict[conv_id, conv_record] — conversations to merge (A56)
+            conversation_history:  list[dict] — archived conversations to append (A56)
+            teaching_events:       list[dict] — teaching events to append (A57)
+            learning_requests:     list[dict] — learning requests to append (A58)
+            interaction_network:   dict[agent_id, network_record] — network data to merge (A59)
         """
         agent = self._agent
         knowledge = agent.knowledge
@@ -187,6 +202,42 @@ class _AgentActorImpl:
             knowledge.dialogue_events.append(event)
         if len(knowledge.dialogue_events) > 5000:
             knowledge.dialogue_events = knowledge.dialogue_events[-5000:]
+
+        # Merge social memory (A53/A54/A60)
+        for agent_id, record in update.get("social_memory", {}).items():
+            knowledge.social_memory[agent_id] = record
+
+        # Append encounters (A60)
+        for encounter in update.get("encounters", []):
+            knowledge.encounters.append(encounter)
+        if len(knowledge.encounters) > 2000:
+            knowledge.encounters = knowledge.encounters[-2000:]
+
+        # Merge active conversations (A56)
+        for conv_id, conv_data in update.get("active_conversations", {}).items():
+            knowledge.active_conversations[conv_id] = conv_data
+
+        # Append conversation history (A56)
+        for conv in update.get("conversation_history", []):
+            knowledge.conversation_history.append(conv)
+        if len(knowledge.conversation_history) > 1000:
+            knowledge.conversation_history = knowledge.conversation_history[-1000:]
+
+        # Append teaching events (A57)
+        for event in update.get("teaching_events", []):
+            knowledge.teaching_events.append(event)
+        if len(knowledge.teaching_events) > 1000:
+            knowledge.teaching_events = knowledge.teaching_events[-1000:]
+
+        # Append learning requests (A58)
+        for request in update.get("learning_requests", []):
+            knowledge.learning_requests.append(request)
+        if len(knowledge.learning_requests) > 1000:
+            knowledge.learning_requests = knowledge.learning_requests[-1000:]
+
+        # Merge interaction network (A59)
+        for peer_id, network_entry in update.get("interaction_network", {}).items():
+            knowledge.interaction_network[peer_id] = network_entry
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 from world.geography import Geography, LocationData
 from world.weather import Weather, WeatherState
 
-from typing import TYPE_CHECKING
+from typing import ClassVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from world.earth_proxy import EarthProxy
@@ -61,6 +61,31 @@ class AgentKnowledge:
     episodic_events: list[dict] = field(default_factory=list)
     dialogue_events: list[dict] = field(default_factory=list)
 
+    # --- Social memory (A53/A54/A60) ---
+    # Persistent memory of other agents this agent has encountered.
+    # Key: agent_id.  Value: relationship record.
+    social_memory: dict[str, dict] = field(default_factory=dict)
+    # Encounter event log (capped).
+    encounters: list[dict] = field(default_factory=list)
+
+    # --- Conversation state (A55/A56) ---
+    # Active conversations this agent is currently engaged in.
+    # Key: conversation_id.  Value: conversation record with participants, topic, messages, etc.
+    active_conversations: dict[str, dict] = field(default_factory=dict)
+    # Archived conversation history (capped at 1000).
+    conversation_history: list[dict] = field(default_factory=list)
+
+    # --- Teaching/learning tracking (A57/A58) ---
+    # Teaching events this agent has conducted (capped at 1000).
+    teaching_events: list[dict] = field(default_factory=list)
+    # Learning requests this agent has made or received (capped at 1000).
+    learning_requests: list[dict] = field(default_factory=list)
+
+    # --- Social network analysis (A59) ---
+    # Interaction network tracking communication patterns with peers.
+    # Key: agent_id.  Value: interaction statistics (count, topics, quality, etc.).
+    interaction_network: dict[str, dict] = field(default_factory=dict)
+
     @property
     def discovered_location_count(self) -> int:
         return len(self.visited_locations)
@@ -89,6 +114,16 @@ class AgentKnowledge:
             "belief_conflicts": list(self.belief_conflicts),
             "episodic_events": list(self.episodic_events),
             "dialogue_events": list(self.dialogue_events),
+            "social_memory": {k: dict(v) for k, v in self.social_memory.items()},
+            "encounters": list(self.encounters),
+            # A55/A56 - Conversations
+            "active_conversations": {k: dict(v) for k, v in self.active_conversations.items()},
+            "conversation_history": list(self.conversation_history),
+            # A57/A58 - Teaching/Learning
+            "teaching_events": list(self.teaching_events),
+            "learning_requests": list(self.learning_requests),
+            # A59 - Social network
+            "interaction_network": {k: dict(v) for k, v in self.interaction_network.items()},
         }
 
     @classmethod
@@ -104,6 +139,16 @@ class AgentKnowledge:
         conflicts_raw = payload.get("belief_conflicts", [])
         events_raw = payload.get("episodic_events", [])
         dialogue_raw = payload.get("dialogue_events", [])
+        social_memory_raw = payload.get("social_memory", {})
+        encounters_raw = payload.get("encounters", [])
+        # A55/A56 - Conversations
+        active_conversations_raw = payload.get("active_conversations", {})
+        conversation_history_raw = payload.get("conversation_history", [])
+        # A57/A58 - Teaching/Learning
+        teaching_events_raw = payload.get("teaching_events", [])
+        learning_requests_raw = payload.get("learning_requests", [])
+        # A59 - Social network
+        interaction_network_raw = payload.get("interaction_network", {})
 
         return cls(
             visited_locations={int(v) for v in visited_raw},
@@ -119,6 +164,16 @@ class AgentKnowledge:
             belief_conflicts=[c for c in conflicts_raw if isinstance(c, dict)],
             episodic_events=[e for e in events_raw if isinstance(e, dict)],
             dialogue_events=[d for d in dialogue_raw if isinstance(d, dict)],
+            social_memory={str(k): v for k, v in social_memory_raw.items() if isinstance(v, dict)},
+            encounters=[e for e in encounters_raw if isinstance(e, dict)],
+            # A55/A56 - Conversations
+            active_conversations={str(k): v for k, v in active_conversations_raw.items() if isinstance(v, dict)},
+            conversation_history=[c for c in conversation_history_raw if isinstance(c, dict)],
+            # A57/A58 - Teaching/Learning
+            teaching_events=[t for t in teaching_events_raw if isinstance(t, dict)],
+            learning_requests=[r for r in learning_requests_raw if isinstance(r, dict)],
+            # A59 - Social network
+            interaction_network={str(k): v for k, v in interaction_network_raw.items() if isinstance(v, dict)},
         )
 
 
@@ -149,16 +204,25 @@ class AgentObservation:
 
 @dataclass
 class AgentGoal:
-    """Agent-generated objective."""
+    """Agent-generated objective.
+
+    Goal types:
+    - "explore": Visit new or specific locations
+    - "investigate_gap": Go to location with knowledge gaps
+    - "recover": Stay put to regain energy
+    - "seek_agent": Find a specific agent at their last known location (A55/A58/A59)
+    """
 
     kind: str
     target_location_id: int | None = None
+    target_agent_id: str | None = None  # For "seek_agent" goals
     priority: float = 1.0
 
     def to_dict(self) -> dict:
         return {
             "kind": self.kind,
             "target_location_id": self.target_location_id,
+            "target_agent_id": self.target_agent_id,
             "priority": self.priority,
         }
 
@@ -169,6 +233,7 @@ class AgentGoal:
         return cls(
             kind=str(payload.get("kind", "explore")),
             target_location_id=(None if payload.get("target_location_id") is None else int(payload["target_location_id"])),
+            target_agent_id=(None if payload.get("target_agent_id") is None else str(payload["target_agent_id"])),
             priority=float(payload.get("priority", 1.0)),
         )
 
@@ -327,6 +392,7 @@ class AutonomousAgent:
             "energy": round(self.energy, 1),
             "knowledge_score": self.knowledge.knowledge_score,
             "visited_locations": self.knowledge.discovered_location_count,
+            "known_agents": len(self.knowledge.social_memory),
             "policy": "q_learning",
             "last_reward": self.last_reward,
             "goal": self.current_goal.to_dict() if self.current_goal else None,
@@ -351,6 +417,28 @@ class AutonomousAgent:
         ]
         summary["known_conditions"] = dict(sorted(self.knowledge.condition_counts.items(), key=lambda item: item[1], reverse=True))
         summary["visited_places"] = visited_places
+
+        # Social connections (A53/A54/A60)
+        social_connections = []
+        for agent_id, mem in sorted(
+            self.knowledge.social_memory.items(),
+            key=lambda item: item[1].get("familiarity", 0),
+            reverse=True,
+        ):
+            social_connections.append({
+                "agent_id": agent_id,
+                "name": mem.get("name"),
+                "encounter_count": mem.get("encounter_count", 0),
+                "familiarity": mem.get("familiarity", 0.0),
+                "trust": mem.get("trust", 0.5),
+                "facts_received": mem.get("facts_received", 0),
+                "facts_shared": mem.get("facts_shared", 0),
+                "first_met_location": mem.get("first_met_location"),
+                "last_met_location": mem.get("last_met_location"),
+                "last_met_tick": mem.get("last_met_tick"),
+            })
+        summary["social_connections"] = social_connections
+        summary["recent_encounters"] = list(self.knowledge.encounters[-20:])
         return summary
 
     def get_visited_places(self, geography: Geography, limit: int = 500) -> list[dict]:
@@ -411,7 +499,7 @@ class AutonomousAgent:
         if self._chroma_store is None:
             self._chroma_store = _get_chroma_store(self.agent_id)
         if self._chroma_store and self._chroma_store.count > 0:
-            chroma_results = self._chroma_store.query(q, top_k=5)
+            chroma_results = self._chroma_store.query(q, top_k=10)
             for score, text, meta in chroma_results:
                 matching = [r for r in memory_records if r.get("text") == text]
                 record = matching[0] if matching else {"text": text, "predicate": meta.get("predicate", ""), "location_id": meta.get("location_id")}
@@ -419,7 +507,7 @@ class AutonomousAgent:
         else:
             facts = [record["text"] for record in memory_records]
             retriever = _get_retriever()
-            ranked = retriever.rank(q, facts, top_k=5)
+            ranked = retriever.rank(q, facts, top_k=10)
             ranked_records = [
                 {
                     "score": float(score),
@@ -427,6 +515,10 @@ class AutonomousAgent:
                 }
                 for score, idx, _ in ranked
             ]
+
+        # Re-rank: boost earth facts and diversify so basic "I visited X"
+        # facts don't drown out richer civilisation knowledge.
+        ranked_records = self._rerank_with_diversity(q, ranked_records)
 
         if ranked_records:
             text = self._compose_answer(q, ranked_records, geography)
@@ -441,12 +533,16 @@ class AutonomousAgent:
             else:
                 text = "I do not have enough memory yet to answer that."
 
+        backend = "sentence-transformers"
+        if self._chroma_store and self._chroma_store.count > 0:
+            backend = "chroma"
+
         return {
             "agent_id": self.agent_id,
             "question": question,
             "answer": text,
             "visited_places": visited_places,
-            "retrieval_backend": retriever.backend,
+            "retrieval_backend": backend,
             "answer_confidence": self._answer_confidence(ranked_records),
             "answer_certainty": self._certainty_label(self._answer_confidence(ranked_records)),
             "supporting_facts": self._supporting_facts(ranked_records, geography),
@@ -559,12 +655,101 @@ class AutonomousAgent:
         if preferred_location is not None:
             location = geography.get_location(preferred_location)
             location_name = location.name if location else str(preferred_location)
-            selected = sorted(by_location[preferred_location], key=lambda item: item["score"], reverse=True)[:4]
+            selected = sorted(by_location[preferred_location], key=lambda item: item["score"], reverse=True)[:8]
             fragments = [item["record"]["text"] for item in selected]
             return f"About {location_name}: " + " ".join(fragments)
 
-        fragments = [item["record"]["text"] for item in ranked_records[:4]]
+        fragments = [item["record"]["text"] for item in ranked_records[:8]]
         return " ".join(fragments)
+
+    # --- Retrieval re-ranking ------------------------------------------------
+
+    # Predicates that are trivially generic ("I visited X", "X is a Y")
+    _TRIVIAL_PREDICATES: ClassVar[set[str]] = {"visit", "visits", "location_type", "coordinates", "connections", "agent_state"}
+
+    # Question keywords → earth_* predicate domains they should boost
+    _DOMAIN_KEYWORDS: ClassVar[dict[str, list[str]]] = {
+        "history": ["earth_history", "earth_heritage", "earth_archive", "earth_government"],
+        "historic": ["earth_history", "earth_heritage", "earth_archive"],
+        "culture": ["earth_culture", "earth_literature", "earth_archaeology"],
+        "cultural": ["earth_culture", "earth_literature", "earth_archaeology"],
+        "news": ["earth_news", "earth_social", "earth_discourse"],
+        "politic": ["earth_politics", "earth_institution", "earth_law"],
+        "parliament": ["earth_politics", "earth_institution"],
+        "crime": ["earth_crime", "earth_safety"],
+        "population": ["earth_demographics", "earth_geography"],
+        "economy": ["earth_economy", "earth_demographics"],
+        "science": ["earth_science", "earth_knowledge", "earth_technology"],
+        "literature": ["earth_literature", "earth_culture"],
+        "heritage": ["earth_heritage", "earth_history", "earth_architecture"],
+        "geography": ["earth_geography", "earth_search"],
+        "transport": ["earth_transport", "earth_geography"],
+        "weather": [],  # basic facts are fine for weather
+        "social": ["earth_social", "earth_discourse"],
+    }
+
+    def _rerank_with_diversity(self, question: str, ranked_records: list[dict]) -> list[dict]:
+        """Re-rank retrieval results to surface earth facts alongside basic facts.
+
+        Strategy:
+        1. Boost all earth_* facts by a base multiplier (richer content deserves
+           more weight than "I visited X").
+        2. If the question mentions a domain keyword (history, culture, etc.),
+           give matching earth predicates an extra boost.
+        3. Diversify: cap trivial basic facts at 3 so earth facts get slots.
+        """
+        if not ranked_records:
+            return ranked_records
+
+        q_lower = question.lower()
+
+        # Detect domain keywords in the question
+        boosted_predicates: set[str] = set()
+        for keyword, domains in self._DOMAIN_KEYWORDS.items():
+            if keyword in q_lower:
+                boosted_predicates.update(domains)
+
+        # Apply score adjustments
+        for item in ranked_records:
+            predicate = str(item["record"].get("predicate", ""))
+            base_score = float(item["score"])
+
+            if predicate.startswith("earth_"):
+                # Base boost for all earth facts (richer content)
+                item["score"] = base_score * 1.15
+                # Extra boost if the question targets this domain
+                if predicate in boosted_predicates:
+                    item["score"] = base_score * 1.35
+
+        # Re-sort by adjusted score
+        ranked_records.sort(key=lambda r: r["score"], reverse=True)
+
+        # Diversify: interleave so trivial basic facts don't monopolise the top
+        trivial: list[dict] = []
+        substantive: list[dict] = []
+        for item in ranked_records:
+            predicate = str(item["record"].get("predicate", ""))
+            if predicate in self._TRIVIAL_PREDICATES:
+                trivial.append(item)
+            else:
+                substantive.append(item)
+
+        # Take up to 3 trivial facts (for context), fill the rest with substantive
+        max_trivial = 3
+        result: list[dict] = []
+        t_idx, s_idx = 0, 0
+        trivial_count = 0
+        # Merge by score, respecting the trivial cap
+        all_items = sorted(trivial + substantive, key=lambda r: r["score"], reverse=True)
+        for item in all_items:
+            predicate = str(item["record"].get("predicate", ""))
+            if predicate in self._TRIVIAL_PREDICATES:
+                if trivial_count >= max_trivial:
+                    continue
+                trivial_count += 1
+            result.append(item)
+
+        return result
 
     def _answer_confidence(self, ranked_records: list[dict]) -> float:
         if not ranked_records:
@@ -647,23 +832,44 @@ class AutonomousAgent:
 
         self._append_fact("connections", f"{loc.name} has {len(observation.neighbour_ids)} connected nearby places.", loc.id)
 
-        # Civilisation content at this location — the world presents it,
-        # the agent perceives it, the agent learns from it. This is the
-        # agent's own knowledge, same as learning "London has 8.9 million
-        # people" from being there. The world resolves civilisation live
-        # via adapters (not from a database) — that's the world's concern.
-        # What the agent remembers is the agent's concern.
-        if observation.earth_facts and loc.id not in self._earth_observed_locations:
+        # Earth facts are ingested via _ingest_earth_facts (called here
+        # and also pre-move in the tick loop to catch resolved facts).
+        self._ingest_earth_facts(observation)
+
+    def _ingest_earth_facts(self, observation: AgentObservation) -> None:
+        """Ingest civilisation/earth facts from an observation.
+
+        Called both during _ingest_observation (post-move learn) and
+        pre-move in the sequential tick loop. The latter is critical because
+        the world resolves facts for the agent's CURRENT location at tick
+        start, but the agent moves before learn() is called — so the new
+        location won't be resolved yet. Pre-move ingestion ensures the
+        agent actually learns from resolved earth content.
+
+        _earth_observed_locations tracks locations where facts have
+        ACTUALLY been ingested. If the agent arrives before the proxy has
+        resolved facts, the location stays eligible for re-ingestion on
+        subsequent ticks.
+        """
+        loc = observation.current_location
+        if not observation.earth_facts or loc.id in self._earth_observed_locations:
+            return
+
+        ingested = 0
+        for ef in observation.earth_facts:
+            text = getattr(ef, "text", None)
+            if isinstance(ef, dict):
+                text = ef.get("text", "")
+            if not text or not text.strip():
+                continue
+            domain = getattr(ef, "domain", "culture") if not isinstance(ef, dict) else ef.get("domain", "culture")
+            topic = getattr(ef, "topic", "earth") if not isinstance(ef, dict) else ef.get("topic", "earth")
+            self._append_fact(f"earth_{domain}", text.strip(), loc.id, value=topic)
+            ingested += 1
+
+        if ingested > 0:
             self._earth_observed_locations.add(loc.id)
-            for ef in observation.earth_facts:
-                text = getattr(ef, "text", None)
-                if isinstance(ef, dict):
-                    text = ef.get("text", "")
-                if not text or not text.strip():
-                    continue
-                domain = getattr(ef, "domain", "culture") if not isinstance(ef, dict) else ef.get("domain", "culture")
-                topic = getattr(ef, "topic", "earth") if not isinstance(ef, dict) else ef.get("topic", "earth")
-                self._append_fact(f"earth_{domain}", text.strip(), loc.id, value=topic)
+            logger.info(f"Agent {self.agent_id} ingested {ingested} earth facts at {loc.name}")
 
     def _append_episode(
         self,
@@ -891,6 +1097,36 @@ class AutonomousAgent:
             knowledge=AgentKnowledge.from_dict(payload.get("knowledge")),
         )
 
+    def _find_specialist_for_location(self, location_id: int) -> str | None:
+        """Find agent in social memory who is a specialist about this location (A59)."""
+        # Look for agents who have high interaction count and know about geography
+        best_specialist = None
+        best_score = 0.0
+
+        for peer_id, network_data in self.knowledge.interaction_network.items():
+            mem = self.knowledge.social_memory.get(peer_id)
+            if not mem:
+                continue
+
+            # Score based on:
+            # - Topic expertise in geography (from A59)
+            # - Trust level
+            # - Teaching effectiveness
+            expertise = network_data.get("topic_expertise", {}).get("geography", 0.0)
+            if expertise < 0.3:  # Not enough expertise
+                continue
+
+            trust = mem.get("trust", 0.5)
+            teaching_eff = mem.get("teaching_effectiveness", 0.5)
+
+            score = expertise * 0.5 + trust * 0.3 + teaching_eff * 0.2
+
+            if score > best_score:
+                best_score = score
+                best_specialist = peer_id
+
+        return best_specialist if best_score > 0.4 else None
+
     def refresh_goal(self, observation: AgentObservation, geography: Geography, rng: random.Random) -> None:
         self.goal_age_ticks += 1
 
@@ -913,6 +1149,23 @@ class AutonomousAgent:
             self.current_goal = AgentGoal(kind="investigate_gap", target_location_id=gap_target, priority=0.9)
             self.goal_age_ticks = 0
             return
+
+        # --- Seek specialist agent for knowledge gap (A58/A59 hybrid seeking) ---
+        # If agent has knowledge gap and knows a specialist, seek them out
+        if gap_target is not None:
+            # Find specialist for this location's topic
+            specialist = self._find_specialist_for_location(gap_target)
+            if specialist:
+                last_location = self.knowledge.social_memory.get(specialist, {}).get("last_met_location")
+                if last_location and last_location != self.location_id:
+                    self.current_goal = AgentGoal(
+                        kind="seek_agent",
+                        target_location_id=last_location,
+                        target_agent_id=specialist,
+                        priority=0.85
+                    )
+                    self.goal_age_ticks = 0
+                    return
 
         unseen_neighbours = [nid for nid in observation.neighbour_ids if nid not in self.knowledge.visited_locations]
         if unseen_neighbours:
@@ -957,6 +1210,17 @@ class AutonomousAgent:
 
         if self.current_goal.kind == "recover" and action_id == self.location_id:
             return 0.25
+
+        if self.current_goal.kind == "seek_agent":
+            # Navigate toward last known location of target agent
+            bonus = 0.0
+            if self.current_goal.target_location_id is not None:
+                if action_id == self.current_goal.target_location_id:
+                    bonus += 0.85  # High bonus for reaching target location
+                next_hop = self._next_hop_toward(observation.current_location.id, self.current_goal.target_location_id, geography)
+                if next_hop == action_id:
+                    bonus += 0.35  # Bonus for moving toward target
+            return bonus
 
         return 0.0
 
@@ -1099,6 +1363,10 @@ class AgentSystem:
     _rng: random.Random = field(default_factory=lambda: random.Random(42))
     social_learning_rate: float = 0.2
 
+    # --- Co-location duration tracking (A60) ---
+    # Maps frozenset({agent_id_a, agent_id_b}) → consecutive ticks co-located.
+    _colocation_ticks: dict[frozenset, int] = field(default_factory=dict, init=False, repr=False)
+
     # --- Ray fields (populated by init_ray) ---
     _use_ray: bool = field(default=False, init=False, repr=False)
     _actors: list = field(default_factory=list, init=False, repr=False)
@@ -1109,7 +1377,7 @@ class AgentSystem:
 
     # Minimum agent count to justify Ray overhead (workers load PyTorch each).
     # Below this threshold, sequential mode is faster and far lighter on memory.
-    RAY_MIN_AGENTS = 10
+    RAY_MIN_AGENTS = 50
 
     def init_ray(self, seed: int = 42) -> bool:
         """Create a Ray actor for each agent. Returns True if Ray mode activated.
@@ -1265,6 +1533,16 @@ class AgentSystem:
                 earth_facts = await earth_proxy.get_resolved_facts(agent.location_id)
 
             observation = agent.perceive(geography, weather, sim_time, earth_facts=earth_facts)
+
+            # Ingest earth facts for current location BEFORE moving.
+            # The world resolved this location at the start of the tick,
+            # so facts are available now. If we only ingest after moving,
+            # the new location won't be resolved yet and facts are lost.
+            # We call the earth-facts section of _ingest_observation only,
+            # NOT the full method, to avoid duplicating basic facts.
+            if earth_facts:
+                agent._ingest_earth_facts(observation)
+
             agent.refresh_goal(observation, geography, self._rng)
             next_location = agent.choose_next_location(observation, geography, weather, self._rng)
             previous_location = agent.location_id
@@ -1294,7 +1572,7 @@ class AgentSystem:
                 }
             )
 
-        self._social_learn(tick_count=tick_count, sim_time=sim_time)
+        self._social_learn(geography=geography, tick_count=tick_count, sim_time=sim_time)
         return events
 
     # --- Ray parallel tick ------------------------------------------------
@@ -1335,11 +1613,11 @@ class AgentSystem:
             self._agent_locations[event["agent_id"]] = event["to_location_id"]
 
         # 6. Social learning — coordinated via remote calls
-        await self._social_learn_ray(tick_count=tick_count, sim_time=sim_time)
+        await self._social_learn_ray(geography=geography, tick_count=tick_count, sim_time=sim_time)
 
         return events
 
-    async def _social_learn_ray(self, tick_count: int | None = None, sim_time: datetime | None = None) -> None:
+    async def _social_learn_ray(self, geography: Geography, tick_count: int | None = None, sim_time: datetime | None = None) -> None:
         """Social learning across Ray actors.
 
         Groups actors by location, pulls social snapshots from co-located
@@ -1400,7 +1678,57 @@ class AgentSystem:
             "belief_conflicts": [],
             "q_updates": {},
             "dialogue_events": [],
+            "social_memory": {},
+            "encounters": [],
         } for _ in range(n)]
+
+        time_iso = sim_time.isoformat() if sim_time else None
+
+        # --- Record encounters & update social memory (A53/A54/A60) --------
+        for i, snap_a in enumerate(snapshots):
+            for j, snap_b in enumerate(snapshots):
+                if j <= i:
+                    continue
+                pair = frozenset({snap_a["agent_id"], snap_b["agent_id"]})
+                duration = self._colocation_ticks.get(pair, 1)
+
+                # Build/update social memory records
+                for idx, me, other in [(i, snap_a, snap_b), (j, snap_b, snap_a)]:
+                    existing = me.get("social_memory", {}).get(other["agent_id"])
+                    if existing is None:
+                        record = {
+                            "name": other.get("name", ""),
+                            "first_met_tick": tick_count,
+                            "first_met_location": location_id,
+                            "last_met_tick": tick_count,
+                            "last_met_location": location_id,
+                            "encounter_count": 1,
+                            "total_colocation_ticks": duration,
+                            "familiarity": 0.0,
+                            "trust": 0.5,
+                            "facts_received": 0,
+                            "facts_shared": 0,
+                        }
+                    else:
+                        record = dict(existing)
+                        if tick_count is not None and tick_count != record.get("last_met_tick"):
+                            record["encounter_count"] = record.get("encounter_count", 1) + 1
+                        record["last_met_tick"] = tick_count
+                        record["last_met_location"] = location_id
+                        record["total_colocation_ticks"] = record.get("total_colocation_ticks", 0) + 1
+                    encounters_count = record.get("encounter_count", 1)
+                    record["familiarity"] = round(1.0 - (1.0 / (1.0 + 0.15 * encounters_count)), 3)
+                    updates[idx]["social_memory"][other["agent_id"]] = record
+
+                    # Log encounter event on first tick of co-location
+                    if duration == 1:
+                        updates[idx]["encounters"].append({
+                            "agent_id": other["agent_id"],
+                            "agent_name": other.get("name", ""),
+                            "location_id": location_id,
+                            "tick": tick_count,
+                            "time": time_iso,
+                        })
 
         # --- Dialogue: each speaker shares their best recent fact ----------
         for si, speaker in enumerate(snapshots):
@@ -1446,6 +1774,16 @@ class AgentSystem:
                     "source_confidence": round(confidence, 3),
                 })
 
+                # Update social memory fact counts + trust (A53/A54)
+                sp_mem = updates[si]["social_memory"].get(listener["agent_id"])
+                if sp_mem:
+                    sp_mem["facts_shared"] = sp_mem.get("facts_shared", 0) + 1
+                li_mem = updates[li]["social_memory"].get(speaker["agent_id"])
+                if li_mem:
+                    li_mem["facts_received"] = li_mem.get("facts_received", 0) + 1
+                    old_trust = li_mem.get("trust", 0.5)
+                    li_mem["trust"] = round(min(1.0, old_trust + 0.01 * confidence), 3)
+
                 # Belief merge for listener
                 if (
                     isinstance(predicate, str)
@@ -1489,6 +1827,16 @@ class AgentSystem:
                     }
                     updates[li]["new_facts"].append(copied)
                     learner_texts.add(text)
+
+                    # Update social memory fact counts + trust (A53/A54)
+                    s_mem = updates[si]["social_memory"].get(learner["agent_id"])
+                    if s_mem:
+                        s_mem["facts_shared"] = s_mem.get("facts_shared", 0) + 1
+                    l_mem = updates[li]["social_memory"].get(sender["agent_id"])
+                    if l_mem:
+                        l_mem["facts_received"] = l_mem.get("facts_received", 0) + 1
+                        old_t = l_mem.get("trust", 0.5)
+                        l_mem["trust"] = round(min(1.0, old_t + 0.005 * sender_conf), 3)
 
                     predicate = copied.get("predicate")
                     loc_id = copied.get("location_id")
@@ -1680,15 +2028,52 @@ class AgentSystem:
         agents = [AutonomousAgent.from_persisted(payload) for payload in payloads]
         return cls(agents=agents, _rng=random.Random(seed))
 
-    def _social_learn(self, tick_count: int | None = None, sim_time: datetime | None = None) -> None:
+    def _social_learn(self, geography: Geography, tick_count: int | None = None, sim_time: datetime | None = None) -> None:
         # If agents share a location, they exchange policy and factual knowledge.
         by_location: dict[int, list[AutonomousAgent]] = {}
         for agent in self.agents:
             by_location.setdefault(agent.location_id, []).append(agent)
 
+        # --- Track co-location duration (A60) ---
+        current_pairs: set[frozenset] = set()
         for location_id, group in by_location.items():
             if len(group) < 2:
                 continue
+            for i, a in enumerate(group):
+                for b in group[i + 1:]:
+                    pair = frozenset({a.agent_id, b.agent_id})
+                    current_pairs.add(pair)
+                    self._colocation_ticks[pair] = self._colocation_ticks.get(pair, 0) + 1
+
+        # Expire pairs that are no longer co-located
+        expired = [pair for pair in self._colocation_ticks if pair not in current_pairs]
+        for pair in expired:
+            del self._colocation_ticks[pair]
+
+        for location_id, group in by_location.items():
+            if len(group) < 2:
+                continue
+
+            # --- Record encounters & update social memory (A53/A54/A60) ---
+            self._record_encounters(group, location_id, tick_count, sim_time)
+
+            # --- Initiate proactive conversations (A55) ---
+            self._initiate_conversations(group, location_id, geography, tick_count, sim_time)
+
+            # --- Process multi-turn conversations (A56) ---
+            self._process_conversations(group, location_id, geography, tick_count, sim_time)
+
+            # --- Deliberate teaching (A57) ---
+            self._teach_knowledge_gaps(group, location_id, geography, tick_count, sim_time)
+
+            # --- Structured learning from peers (A58) ---
+            self._request_knowledge(group, location_id, geography, tick_count, sim_time)
+
+            # --- Track interactions for social network (A59) ---
+            for agent in group:
+                for peer in group:
+                    if agent.agent_id != peer.agent_id:
+                        self._update_interaction_tracking(agent, peer.agent_id, f"location:{location_id}", tick_count)
 
             self._social_dialogue(group, location_id=location_id, tick_count=tick_count, sim_time=sim_time)
             self._social_exchange_facts(group)
@@ -1714,6 +2099,96 @@ class AgentSystem:
                     old_q + self.social_learning_rate * (peer_best_q - old_q),
                     6,
                 )
+
+        # --- Periodic network analysis (A59) - run every 10 ticks ---
+        if tick_count is not None and tick_count % 10 == 0:
+            self._update_specialist_detection(self.agents, tick_count)
+
+        # --- Centrality computation (A59) - run every 50 ticks ---
+        if tick_count is not None and tick_count % 50 == 0:
+            self._compute_network_centrality(self.agents, tick_count)
+
+    # --- Encounter recording & social memory (A53/A54/A60) ----------------
+
+    def _record_encounters(
+        self,
+        group: list[AutonomousAgent],
+        location_id: int,
+        tick_count: int | None,
+        sim_time: datetime | None,
+    ) -> None:
+        """Record encounters and update social memory for all co-located pairs."""
+        time_iso = sim_time.isoformat() if sim_time else None
+        for i, agent_a in enumerate(group):
+            for agent_b in group[i + 1:]:
+                pair = frozenset({agent_a.agent_id, agent_b.agent_id})
+                duration = self._colocation_ticks.get(pair, 1)
+
+                # Update both agents' social memory
+                self._update_social_memory(agent_a, agent_b, location_id, tick_count, duration)
+                self._update_social_memory(agent_b, agent_a, location_id, tick_count, duration)
+
+                # Log encounter event on both agents (only on first tick of co-location)
+                if duration == 1:
+                    encounter = {
+                        "agent_id": agent_b.agent_id,
+                        "agent_name": agent_b.name,
+                        "location_id": location_id,
+                        "tick": tick_count,
+                        "time": time_iso,
+                    }
+                    agent_a.knowledge.encounters.append(encounter)
+                    if len(agent_a.knowledge.encounters) > 2000:
+                        agent_a.knowledge.encounters = agent_a.knowledge.encounters[-2000:]
+
+                    encounter_b = {
+                        "agent_id": agent_a.agent_id,
+                        "agent_name": agent_a.name,
+                        "location_id": location_id,
+                        "tick": tick_count,
+                        "time": time_iso,
+                    }
+                    agent_b.knowledge.encounters.append(encounter_b)
+                    if len(agent_b.knowledge.encounters) > 2000:
+                        agent_b.knowledge.encounters = agent_b.knowledge.encounters[-2000:]
+
+    def _update_social_memory(
+        self,
+        agent: AutonomousAgent,
+        other: AutonomousAgent,
+        location_id: int,
+        tick_count: int | None,
+        duration_ticks: int,
+    ) -> None:
+        """Update agent's social memory record for another agent."""
+        mem = agent.knowledge.social_memory.get(other.agent_id)
+        if mem is None:
+            # First encounter — create record
+            mem = {
+                "name": other.name,
+                "first_met_tick": tick_count,
+                "first_met_location": location_id,
+                "last_met_tick": tick_count,
+                "last_met_location": location_id,
+                "encounter_count": 1,
+                "total_colocation_ticks": duration_ticks,
+                "familiarity": 0.0,
+                "trust": 0.5,
+                "facts_received": 0,
+                "facts_shared": 0,
+            }
+            agent.knowledge.social_memory[other.agent_id] = mem
+        else:
+            # Subsequent encounter — update
+            if tick_count is not None and tick_count != mem.get("last_met_tick"):
+                mem["encounter_count"] = mem.get("encounter_count", 1) + 1
+            mem["last_met_tick"] = tick_count
+            mem["last_met_location"] = location_id
+            mem["total_colocation_ticks"] = mem.get("total_colocation_ticks", 0) + 1
+
+        # Familiarity: grows with encounters, diminishing returns (asymptotic to 1.0)
+        encounters = mem.get("encounter_count", 1)
+        mem["familiarity"] = round(1.0 - (1.0 / (1.0 + 0.15 * encounters)), 3)
 
     def _social_dialogue(
         self,
@@ -1771,6 +2246,17 @@ class AgentSystem:
                 )
                 if len(listener.knowledge.facts) > 5000:
                     listener.knowledge.facts = listener.knowledge.facts[-5000:]
+
+                # Update social memory fact counts (A53/A54)
+                speaker_mem = speaker.knowledge.social_memory.get(listener.agent_id)
+                if speaker_mem:
+                    speaker_mem["facts_shared"] = speaker_mem.get("facts_shared", 0) + 1
+                listener_mem = listener.knowledge.social_memory.get(speaker.agent_id)
+                if listener_mem:
+                    listener_mem["facts_received"] = listener_mem.get("facts_received", 0) + 1
+                    # Trust nudge: receiving information increases trust slightly
+                    old_trust = listener_mem.get("trust", 0.5)
+                    listener_mem["trust"] = round(min(1.0, old_trust + 0.01 * confidence), 3)
 
                 if (
                     isinstance(predicate, str)
@@ -1842,6 +2328,16 @@ class AgentSystem:
                     if len(learner.knowledge.facts) > 5000:
                         learner.knowledge.facts = learner.knowledge.facts[-5000:]
 
+                    # Update social memory fact counts (A53/A54)
+                    sender_mem = sender.knowledge.social_memory.get(learner.agent_id)
+                    if sender_mem:
+                        sender_mem["facts_shared"] = sender_mem.get("facts_shared", 0) + 1
+                    learner_mem = learner.knowledge.social_memory.get(sender.agent_id)
+                    if learner_mem:
+                        learner_mem["facts_received"] = learner_mem.get("facts_received", 0) + 1
+                        old_trust = learner_mem.get("trust", 0.5)
+                        learner_mem["trust"] = round(min(1.0, old_trust + 0.005 * sender_conf), 3)
+
                     predicate = copied.get("predicate")
                     location_id = copied.get("location_id")
                     value = copied.get("value")
@@ -1909,3 +2405,582 @@ class AgentSystem:
             existing["confidence"] = round(max(0.35, min(0.95, (existing_confidence + sender_confidence) / 2.0)), 3)
         else:
             existing["confidence"] = round(max(0.2, existing_confidence - 0.03 * sender_confidence), 3)
+
+    # --- A55: Proactive Communication Helper Methods ---------------------
+
+    def _compute_conversation_initiation_score(
+        self,
+        initiator: AutonomousAgent,
+        peer: AutonomousAgent,
+        topic: str,
+        geography: Geography,
+        tick_count: int | None = None,
+    ) -> float:
+        """Compute score for whether initiator should start conversation with peer about topic."""
+        # Knowledge gap component (0-1)
+        gap_score = 0.0
+        if topic.startswith("location:"):
+            try:
+                loc_id = int(topic.split(":")[1])
+                gap_score = initiator._knowledge_gap_score(loc_id, geography)
+            except (ValueError, IndexError):
+                gap_score = 0.0
+        else:
+            # For predicate topics, estimate gap by checking if initiator has few facts about it
+            predicate = topic.split(":")[1] if ":" in topic else topic
+            initiator_fact_count = sum(
+                1 for f in initiator.knowledge.facts if f.get("predicate") == predicate
+            )
+            gap_score = max(0.0, min(1.0, (10 - initiator_fact_count) / 10.0))
+
+        # Social component (0-1)
+        mem = initiator.knowledge.social_memory.get(peer.agent_id, {})
+        familiarity = mem.get("familiarity", 0.0)
+        trust = mem.get("trust", 0.5)
+        social_score = (familiarity + trust) / 2.0
+
+        # Recency penalty (avoid spamming same agent)
+        last_interaction = mem.get("last_met_tick")
+        if last_interaction is not None and tick_count is not None:
+            ticks_since = max(1, tick_count - last_interaction)
+            recency_penalty = min(1.0, ticks_since / 10.0)
+        else:
+            recency_penalty = 1.0  # No penalty if no history
+
+        return gap_score * social_score * recency_penalty
+
+    def _initiate_conversations(
+        self,
+        group: list[AutonomousAgent],
+        location_id: int,
+        geography: Geography,
+        tick_count: int | None,
+        sim_time: datetime | None,
+    ) -> None:
+        """Initiate proactive conversations based on knowledge gaps (A55)."""
+        for agent in group:
+            # Limit: max 3 active conversations per agent
+            if len(agent.knowledge.active_conversations) >= 3:
+                continue
+
+            # Identify knowledge gap (use current location as topic)
+            topic = f"location:{location_id}"
+            gap_score = agent._knowledge_gap_score(location_id, geography)
+            if gap_score < 0.3:  # No significant gap
+                continue
+
+            # Find best peer to ask
+            peers = [p for p in group if p.agent_id != agent.agent_id]
+            if not peers:
+                continue
+
+            # Score all peers
+            scored_peers = [
+                (self._compute_conversation_initiation_score(agent, peer, topic, geography, tick_count), peer)
+                for peer in peers
+            ]
+            scored_peers.sort(key=lambda x: x[0], reverse=True)
+
+            if scored_peers[0][0] < 0.5:  # Score too low
+                continue
+
+            best_peer = scored_peers[0][1]
+
+            # Create conversation
+            conv_id = f"conv_{min(agent.agent_id, best_peer.agent_id)}_{max(agent.agent_id, best_peer.agent_id)}_{tick_count or 0}"
+            if conv_id in agent.knowledge.active_conversations:
+                continue  # Conversation already exists
+
+            conversation = {
+                "participants": [agent.agent_id, best_peer.agent_id],
+                "topic": topic,
+                "initiator": agent.agent_id,
+                "started_tick": tick_count or 0,
+                "turn_count": 0,
+                "last_tick": tick_count or 0,
+                "messages": [],
+                "status": "active",
+            }
+
+            # Add to both agents
+            agent.knowledge.active_conversations[conv_id] = conversation
+            best_peer.knowledge.active_conversations[conv_id] = conversation
+
+            # Update social memory
+            mem = agent.knowledge.social_memory.get(best_peer.agent_id)
+            if mem:
+                mem["requests_sent"] = mem.get("requests_sent", 0) + 1
+                mem["conversations_initiated"] = mem.get("conversations_initiated", 0) + 1
+
+            peer_mem = best_peer.knowledge.social_memory.get(agent.agent_id)
+            if peer_mem:
+                peer_mem["requests_received"] = peer_mem.get("requests_received", 0) + 1
+
+            # Limit: only 1 initiation per agent per tick
+            break
+
+    # --- A56: Multi-turn Dialogue -----------------------------------------
+
+    def _process_conversations(
+        self,
+        group: list[AutonomousAgent],
+        location_id: int,
+        geography: Geography,
+        tick_count: int | None,
+        sim_time: datetime | None,
+    ) -> None:
+        """Process active conversations for multi-turn dialogue (A56)."""
+        agent_ids = {a.agent_id for a in group}
+
+        for agent in group:
+            # Check each active conversation
+            for conv_id in list(agent.knowledge.active_conversations.keys()):
+                conv = agent.knowledge.active_conversations[conv_id]
+
+                # Skip if conversation already concluded
+                if conv.get("status") != "active":
+                    continue
+
+                # Check if conversation partners still co-located
+                participants = set(conv["participants"])
+                if not participants.issubset(agent_ids):
+                    self._conclude_conversation(agent, conv_id, "agents_separated", tick_count)
+                    continue
+
+                # Max turn limit (5 turns)
+                if conv["turn_count"] >= 5:
+                    self._conclude_conversation(agent, conv_id, "max_turns_reached", tick_count)
+                    continue
+
+                # Determine if this agent should respond
+                messages = conv.get("messages", [])
+                if not messages:
+                    continue  # No messages yet, wait for initiator
+
+                last_message = messages[-1]
+                last_speaker = last_message.get("from")
+
+                # If last speaker was this agent, wait for other agent's turn
+                if last_speaker == agent.agent_id:
+                    continue
+
+                # Generate response
+                response_text = self._generate_conversation_response(agent, conv, geography)
+
+                if response_text:
+                    # Add response message
+                    message = {
+                        "from": agent.agent_id,
+                        "text": response_text,
+                        "tick": tick_count or 0,
+                    }
+                    conv["messages"].append(message)
+                    conv["turn_count"] += 1
+                    conv["last_tick"] = tick_count or 0
+
+                    # Update conversation for both participants
+                    for peer in group:
+                        if peer.agent_id in participants:
+                            if conv_id in peer.knowledge.active_conversations:
+                                peer.knowledge.active_conversations[conv_id] = conv
+                else:
+                    # No response possible, topic exhausted
+                    self._conclude_conversation(agent, conv_id, "topic_exhausted", tick_count)
+
+    def _generate_conversation_response(
+        self,
+        agent: AutonomousAgent,
+        conversation: dict,
+        geography: Geography,
+    ) -> str | None:
+        """Generate contextual response in multi-turn conversation (A56)."""
+        topic = conversation.get("topic", "")
+        messages = conversation.get("messages", [])
+
+        if not messages:
+            return None
+
+        last_message = messages[-1]
+        last_text = last_message.get("text", "")
+
+        # If last message was a question (contains ?), provide an answer
+        if "?" in last_text:
+            # Find relevant fact about topic
+            if topic.startswith("location:"):
+                try:
+                    loc_id = int(topic.split(":")[1])
+                    # Get facts about this location
+                    relevant_facts = [
+                        f for f in agent.knowledge.facts
+                        if f.get("location_id") == loc_id
+                    ]
+                    if relevant_facts:
+                        # Return highest confidence fact
+                        best_fact = max(
+                            relevant_facts,
+                            key=lambda f: agent.knowledge.beliefs.get(
+                                f"{f.get('predicate')}:{loc_id}", {}
+                            ).get("confidence", 0.0),
+                            default=relevant_facts[0]
+                        )
+                        return f"Based on my knowledge, {best_fact.get('text', '')}"
+                except (ValueError, IndexError):
+                    pass
+
+            return None  # Don't know answer
+
+        # If last message was a statement, check for belief conflict or add complementary info
+        else:
+            # Check if agent has conflicting belief
+            for belief_key, belief in agent.knowledge.beliefs.items():
+                if belief.get("predicate") in last_text.lower():
+                    # Found potentially relevant belief
+                    # Check recent conflicts
+                    conflicts = agent.knowledge.belief_conflicts[-10:]
+                    for conflict in conflicts:
+                        if conflict.get("predicate") == belief.get("predicate"):
+                            return f"Interesting, but I observed {conflict.get('new_value')}"
+
+            # Add complementary information if available
+            if topic.startswith("location:"):
+                try:
+                    loc_id = int(topic.split(":")[1])
+                    # Find fact not yet mentioned in conversation
+                    mentioned_texts = {msg.get("text", "") for msg in messages}
+                    unused_facts = [
+                        f for f in agent.knowledge.facts
+                        if f.get("location_id") == loc_id and f.get("text") not in mentioned_texts
+                    ]
+                    if unused_facts:
+                        fact = unused_facts[0]
+                        return f"Also, {fact.get('text', '')}"
+                except (ValueError, IndexError):
+                    pass
+
+        return None  # No response to generate
+
+    def _conclude_conversation(
+        self,
+        agent: AutonomousAgent,
+        conv_id: str,
+        reason: str,
+        tick_count: int | None,
+    ) -> None:
+        """Conclude an active conversation and archive it (A56)."""
+        if conv_id not in agent.knowledge.active_conversations:
+            return
+
+        conv = agent.knowledge.active_conversations[conv_id]
+        conv["status"] = "concluded"
+        conv["conclusion_reason"] = reason
+        conv["concluded_tick"] = tick_count or 0
+
+        # Move to history
+        agent.knowledge.conversation_history.append(conv)
+        if len(agent.knowledge.conversation_history) > 1000:
+            agent.knowledge.conversation_history = agent.knowledge.conversation_history[-1000:]
+
+        # Remove from active
+        del agent.knowledge.active_conversations[conv_id]
+
+        # Update social memory
+        for participant_id in conv.get("participants", []):
+            if participant_id != agent.agent_id:
+                mem = agent.knowledge.social_memory.get(participant_id)
+                if mem:
+                    turn_count = conv.get("turn_count", 0)
+                    current_avg = mem.get("avg_conversation_length", 0.0)
+                    conv_count = mem.get("conversations_initiated", 0) + mem.get("conversations_participated", 0)
+                    if conv_count > 0:
+                        mem["avg_conversation_length"] = round(
+                            (current_avg * (conv_count - 1) + turn_count) / conv_count,
+                            2
+                        )
+
+    # --- A57: Deliberate Teaching ------------------------------------------
+
+    def _assess_peer_knowledge_gaps(
+        self,
+        teacher: AutonomousAgent,
+        learner: AutonomousAgent,
+        location_id: int,
+    ) -> list[str]:
+        """Identify what learner doesn't know about a location that teacher knows (A57)."""
+        # Teacher's predicates for this location
+        teacher_predicates = set()
+        for fact in teacher.knowledge.facts:
+            if fact.get("location_id") == location_id:
+                pred = fact.get("predicate")
+                if pred:
+                    teacher_predicates.add(pred)
+
+        # Learner's predicates for this location
+        learner_predicates = set()
+        for fact in learner.knowledge.facts:
+            if fact.get("location_id") == location_id:
+                pred = fact.get("predicate")
+                if pred:
+                    learner_predicates.add(pred)
+
+        # Return missing predicates
+        missing = teacher_predicates - learner_predicates
+        return list(missing)
+
+    def _teach_knowledge_gaps(
+        self,
+        group: list[AutonomousAgent],
+        location_id: int,
+        geography: Geography,
+        tick_count: int | None,
+        sim_time: datetime | None,
+    ) -> None:
+        """Deliberate teaching based on knowledge gap assessment (A57)."""
+        for teacher in group:
+            for learner in group:
+                if teacher.agent_id == learner.agent_id:
+                    continue
+
+                # Assess gaps
+                missing_predicates = self._assess_peer_knowledge_gaps(teacher, learner, location_id)
+                if not missing_predicates:
+                    continue  # Learner knows everything teacher knows
+
+                # Select facts to teach (top 3 highest confidence)
+                facts_to_teach = []
+                for predicate in missing_predicates[:3]:  # Limit to 3 predicates
+                    # Find teacher's facts with this predicate at this location
+                    relevant_facts = [
+                        f for f in teacher.knowledge.facts
+                        if f.get("predicate") == predicate and f.get("location_id") == location_id
+                    ]
+                    if relevant_facts:
+                        # Pick highest confidence fact
+                        belief_key = f"{predicate}:{location_id}"
+                        confidence = teacher.knowledge.beliefs.get(belief_key, {}).get("confidence", 0.5)
+                        if confidence > 0.4:  # Only teach if confident
+                            facts_to_teach.append((relevant_facts[0], confidence))
+
+                if not facts_to_teach:
+                    continue
+
+                # Teach facts to learner
+                for fact, confidence in facts_to_teach:
+                    taught_fact = {
+                        **fact,
+                        "source": "taught",
+                        "source_agent": teacher.agent_id,
+                        "source_confidence": confidence,
+                    }
+                    learner.knowledge.facts.append(taught_fact)
+
+                if len(learner.knowledge.facts) > 5000:
+                    learner.knowledge.facts = learner.knowledge.facts[-5000:]
+
+                # Record teaching event
+                teaching_event = {
+                    "taught_agent": learner.agent_id,
+                    "topic": f"location:{location_id}",
+                    "facts_taught": len(facts_to_teach),
+                    "tick": tick_count or 0,
+                    "effectiveness": None,  # Will be assessed later
+                }
+                teacher.knowledge.teaching_events.append(teaching_event)
+                if len(teacher.knowledge.teaching_events) > 1000:
+                    teacher.knowledge.teaching_events = teacher.knowledge.teaching_events[-1000:]
+
+                # Update social memory
+                teacher_mem = teacher.knowledge.social_memory.get(learner.agent_id)
+                if teacher_mem:
+                    teacher_mem["times_taught"] = teacher_mem.get("times_taught", 0) + 1
+
+                learner_mem = learner.knowledge.social_memory.get(teacher.agent_id)
+                if learner_mem:
+                    learner_mem["times_learned_from"] = learner_mem.get("times_learned_from", 0) + 1
+                    learner_mem["learning_value"] = learner_mem.get("learning_value", 0.0) + len(facts_to_teach)
+
+                # Limit: 1 teaching event per pair per tick
+                break
+
+    # --- A58: Structured Learning from Peers ------------------------------
+
+    def _request_knowledge(
+        self,
+        group: list[AutonomousAgent],
+        location_id: int,
+        geography: Geography,
+        tick_count: int | None,
+        sim_time: datetime | None,
+    ) -> None:
+        """Handle structured knowledge requests from peers (A58)."""
+        for requester in group:
+            # Check if requester has knowledge gap
+            gap_score = requester._knowledge_gap_score(location_id, geography)
+            if gap_score < 0.5:  # No significant gap
+                continue
+
+            # Find best provider based on social network
+            best_provider = None
+            best_score = 0.0
+
+            for provider in group:
+                if provider.agent_id == requester.agent_id:
+                    continue
+
+                # Score provider
+                mem = requester.knowledge.social_memory.get(provider.agent_id)
+                if not mem:
+                    continue
+
+                trust = mem.get("trust", 0.5)
+                teaching_eff = mem.get("teaching_effectiveness", 0.5)
+                times_learned = mem.get("times_learned_from", 0)
+
+                # Higher score for trusted, effective teachers
+                score = trust * 0.5 + teaching_eff * 0.3 + min(times_learned / 10.0, 0.2)
+
+                if score > best_score:
+                    best_score = score
+                    best_provider = provider
+
+            if not best_provider or best_score < 0.3:
+                continue  # No good provider
+
+            # Request knowledge (get provider's facts about this location)
+            provided_facts = [
+                f for f in best_provider.knowledge.facts
+                if f.get("location_id") == location_id
+            ][:5]  # Top 5 facts
+
+            if not provided_facts:
+                continue
+
+            # Integrate with confidence boost (requested knowledge is more trusted)
+            confidence_multiplier = 1.2 * best_score
+
+            for fact in provided_facts:
+                base_conf = fact.get("source_confidence", 0.5)
+                adjusted_conf = min(1.0, base_conf * confidence_multiplier)
+
+                requested_fact = {
+                    **fact,
+                    "source": "requested",
+                    "source_agent": best_provider.agent_id,
+                    "source_confidence": round(adjusted_conf, 3),
+                }
+                requester.knowledge.facts.append(requested_fact)
+
+            if len(requester.knowledge.facts) > 5000:
+                requester.knowledge.facts = requester.knowledge.facts[-5000:]
+
+            # Record learning request
+            learning_request = {
+                "from_agent": requester.agent_id,
+                "to_agent": best_provider.agent_id,
+                "topic": f"location:{location_id}",
+                "tick": tick_count or 0,
+                "fulfilled": True,
+                "facts_received": len(provided_facts),
+            }
+            requester.knowledge.learning_requests.append(learning_request)
+            if len(requester.knowledge.learning_requests) > 1000:
+                requester.knowledge.learning_requests = requester.knowledge.learning_requests[-1000:]
+
+            # Limit: 1 request per agent per tick
+            break
+
+    # --- A59: Social Network Formation (complete) -------------------------
+
+    def _update_specialist_detection(
+        self,
+        agents: list[AutonomousAgent],
+        tick_count: int | None,
+    ) -> None:
+        """Detect knowledge specialists and update social memory (A59)."""
+        # Build predicate expertise map for each agent
+        for observer in agents:
+            for peer in agents:
+                if observer.agent_id == peer.agent_id:
+                    continue
+
+                mem = observer.knowledge.social_memory.get(peer.agent_id)
+                if not mem:
+                    continue
+
+                # Count facts per predicate for this peer
+                predicate_counts = {}
+                for fact in peer.knowledge.facts:
+                    pred = fact.get("predicate")
+                    if pred:
+                        predicate_counts[pred] = predicate_counts.get(pred, 0) + 1
+
+                # Update topic expertise scores (0-1 based on fact count)
+                topic_expertise = {}
+                for predicate, count in predicate_counts.items():
+                    topic_expertise[predicate] = min(1.0, count / 10.0)
+
+                mem["topic_expertise"] = topic_expertise
+
+                # Update specialty predicates (top 3)
+                top_predicates = sorted(
+                    predicate_counts.items(),
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:3]
+                mem["specialty_predicates"] = [p for p, _ in top_predicates]
+
+    def _compute_network_centrality(
+        self,
+        agents: list[AutonomousAgent],
+        tick_count: int | None,
+    ) -> None:
+        """Compute centrality scores and identify hubs (A59)."""
+        for agent in agents:
+            if not agent.knowledge.interaction_network:
+                continue
+
+            # Compute centrality (simple: interaction count / max)
+            max_interactions = max(
+                (entry.get("interaction_count", 0) for entry in agent.knowledge.interaction_network.values()),
+                default=1
+            )
+
+            for peer_id, network_entry in agent.knowledge.interaction_network.items():
+                interaction_count = network_entry.get("interaction_count", 0)
+                topics_count = len(network_entry.get("topics_discussed", {}))
+
+                centrality = interaction_count / max_interactions if max_interactions > 0 else 0.0
+                network_entry["centrality_score"] = round(centrality, 3)
+
+                # Mark as hub if high centrality and diverse topics
+                is_hub = centrality > 0.7 and topics_count >= 3
+                network_entry["is_hub"] = is_hub
+
+                # Update social memory
+                mem = agent.knowledge.social_memory.get(peer_id)
+                if mem:
+                    mem["is_hub"] = is_hub
+
+    def _update_interaction_tracking(
+        self,
+        agent: AutonomousAgent,
+        peer_id: str,
+        topic: str,
+        tick_count: int | None,
+    ) -> None:
+        """Track interaction for social network analysis (A59)."""
+        network_entry = agent.knowledge.interaction_network.setdefault(
+            peer_id,
+            {
+                "interaction_count": 0,
+                "last_interaction_tick": 0,
+                "topics_discussed": {},
+                "knowledge_quality": 0.0,
+                "centrality_score": 0.0,
+                "is_hub": False,
+            },
+        )
+
+        network_entry["interaction_count"] += 1
+        network_entry["last_interaction_tick"] = tick_count or 0
+        topics_dict = network_entry["topics_discussed"]
+        topics_dict[topic] = topics_dict.get(topic, 0) + 1

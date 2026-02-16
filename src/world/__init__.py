@@ -105,8 +105,9 @@ class World:
         # Set initial weather state
         self.weather.update(self.time.current_time)
 
+        from agents.system import AgentSystem
+
         if persisted_agents:
-            from agents.system import AgentSystem
             payloads = [
                 {
                     "id": row.id,
@@ -128,9 +129,27 @@ class World:
                 for row in persisted_agents
             ]
             self.agents = AgentSystem.from_persisted(payloads, seed=self.config.agent_random_seed)
+
+            # Top up if configured count is higher than persisted count
+            existing_count = len(self.agents.agents)
+            if existing_count < self.config.agent_count:
+                topup = AgentSystem.bootstrap(
+                    geography=self.geography,
+                    count=self.config.agent_count,
+                    learning_rate=self.config.agent_learning_rate,
+                    exploration_bias=self.config.agent_exploration_bias,
+                    seed=self.config.agent_random_seed,
+                )
+                # Only take the new agents (skip indices that overlap with existing)
+                existing_ids = {a.agent_id for a in self.agents.agents}
+                for agent in topup.agents:
+                    if agent.agent_id not in existing_ids and len(self.agents.agents) < self.config.agent_count:
+                        self.agents.agents.append(agent)
+                added = len(self.agents.agents) - existing_count
+                if added > 0:
+                    logger.info(f"Topped up {added} new agents (total: {len(self.agents.agents)})")
         else:
-            from agents.system import AgentSystem
-            # Bootstrap autonomous agents
+            # Bootstrap autonomous agents from scratch
             self.agents = AgentSystem.bootstrap(
                 geography=self.geography,
                 count=self.config.agent_count,
@@ -156,7 +175,7 @@ class World:
             logger.warning(f"Ray init failed, using sequential mode: {e}")
 
         # Initialise Earth proxy — the world's live connection to civilisation
-        self.earth_proxy = EarthProxy()
+        self.earth_proxy = EarthProxy(policies=self.config.adapters)  # Pass adapter policies from config
         try:
             from config import settings
             await self.earth_proxy.connect_redis(settings.redis_url)
@@ -169,7 +188,11 @@ class World:
         except Exception as e:
             logger.warning(f"Failed to register adapters: {e}")
         backend = "Redis" if self.earth_proxy.using_redis else "in-memory fallback"
-        logger.info(f"Earth proxy ready: {self.earth_proxy.adapter_count} adapters, backend={backend}")
+        enabled_count = len([a for a in self.earth_proxy.adapters if self.earth_proxy.policies.get_policy(a.name).enabled])
+        logger.info(
+            f"Earth proxy ready: {self.earth_proxy.adapter_count} adapters "
+            f"({enabled_count} enabled), backend={backend}"
+        )
 
     async def tick(self) -> dict:
         """

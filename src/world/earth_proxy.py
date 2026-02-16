@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from adapters.base import EarthAdapter, EarthFact
+from world.config import AdapterPolicies, FallbackBehavior
+from world.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -67,13 +69,17 @@ class EarthProxy:
 
     adapters: list[EarthAdapter] = field(default_factory=list)
     ttl_seconds: int = DEFAULT_TTL_SECONDS
+    policies: AdapterPolicies = field(default_factory=AdapterPolicies)  # NEW
     _redis: object | None = field(default=None, repr=False)
+    _rate_limiter: RateLimiter | None = field(default=None, repr=False)  # NEW
 
     # Fallback in-memory store (used when Redis is not available)
     _fallback_entries: dict[str, tuple[list[EarthFact], float]] = field(default_factory=dict)
 
     # Stats
     _resolve_count: int = field(default=0)
+    _rate_limited_count: dict[str, int] = field(default_factory=dict)  # NEW
+    _disabled_adapters: set[str] = field(default_factory=set)  # NEW
 
     async def connect_redis(self, redis_url: str) -> None:
         """Connect to Redis. Call during server startup."""
@@ -81,10 +87,14 @@ class EarthProxy:
             import redis.asyncio as aioredis
             self._redis = aioredis.from_url(redis_url, decode_responses=True)
             await self._redis.ping()
+            # Initialize rate limiter with Redis connection
+            self._rate_limiter = RateLimiter(self._redis)  # NEW
             logger.info(f"Earth proxy connected to Redis at {redis_url}")
         except Exception as e:
             logger.warning(f"Redis not available ({e}), falling back to in-memory TTL")
             self._redis = None
+            # Initialize rate limiter with in-memory fallback
+            self._rate_limiter = RateLimiter(None)  # NEW
 
     async def disconnect_redis(self) -> None:
         """Disconnect from Redis. Call during server shutdown."""
@@ -135,19 +145,11 @@ class EarthProxy:
         query = location_name
 
         for adapter in self.adapters:
-            try:
-                facts = await adapter.resolve(
-                    query=query,
-                    location_name=location_name,
-                    location_id=location_id,
-                    max_results=max_results_per_adapter,
-                )
-                all_facts.extend(facts)
-                logger.debug(
-                    f"Earth proxy: {adapter.name} resolved {len(facts)} facts for {location_name}"
-                )
-            except Exception as e:
-                logger.warning(f"Earth proxy: adapter {adapter.name} failed for {location_name}: {e}")
+            # Use policy enforcement wrapper (handles enabled check, rate limits, fallback)
+            facts = await self._resolve_with_policy(
+                adapter, query, location_name, location_id, max_results_per_adapter
+            )
+            all_facts.extend(facts)
 
         await self._set_facts(key, all_facts)
         self._resolve_count += 1
@@ -180,16 +182,11 @@ class EarthProxy:
 
         all_facts: list[EarthFact] = []
         for adapter in self.adapters:
-            try:
-                facts = await adapter.resolve(
-                    query=query,
-                    location_name=location_name,
-                    location_id=location_id,
-                    max_results=max_results_per_adapter,
-                )
-                all_facts.extend(facts)
-            except Exception as e:
-                logger.warning(f"Earth proxy: adapter {adapter.name} failed for query '{query}': {e}")
+            # Use policy enforcement wrapper (handles enabled check, rate limits, fallback)
+            facts = await self._resolve_with_policy(
+                adapter, query, location_name, location_id, max_results_per_adapter
+            )
+            all_facts.extend(facts)
 
         await self._set_facts(key, all_facts)
         self._resolve_count += 1
@@ -222,6 +219,143 @@ class EarthProxy:
             except Exception:
                 results[adapter.name] = False
         return results
+
+    def get_policy_stats(self) -> dict:
+        """Get statistics about policy enforcement.
+
+        Returns metrics on rate limiting, disabled adapters, and policy
+        configuration for monitoring and debugging.
+        """
+        return {
+            "total_resolves": self._resolve_count,
+            "rate_limited_counts": dict(self._rate_limited_count),
+            "disabled_adapters": list(self._disabled_adapters),
+            "enabled_adapter_count": len([
+                a for a in self.adapters
+                if self.policies.get_policy(a.name).enabled
+            ]),
+        }
+
+    # ------------------------------------------------------------------
+    # Policy enforcement — rate limits, fallback behavior, enable/disable
+    # ------------------------------------------------------------------
+
+    async def _resolve_with_policy(
+        self,
+        adapter: EarthAdapter,
+        query: str,
+        location_name: str | None,
+        location_id: int | None,
+        max_results: int,
+    ) -> list[EarthFact]:
+        """Resolve from adapter with policy enforcement.
+
+        Wraps adapter.resolve() with all policy checks:
+        - Check if adapter is enabled
+        - Enforce rate limits
+        - Handle failures according to fallback policy
+
+        This is the single enforcement point for all adapter policies.
+        """
+        policy = self.policies.get_policy(adapter.name)
+
+        # 1. Check if adapter is enabled
+        if not policy.enabled:
+            if adapter.name not in self._disabled_adapters:
+                logger.info(f"Adapter {adapter.name} is disabled by policy")
+                self._disabled_adapters.add(adapter.name)
+            return []
+
+        # 2. Check rate limits
+        if self._rate_limiter:
+            rate_check = await self._rate_limiter.check_rate_limit(
+                adapter.name,
+                policy.max_requests_per_second,
+                policy.max_requests_per_minute,
+            )
+            if not rate_check.allowed:
+                self._rate_limited_count[adapter.name] = \
+                    self._rate_limited_count.get(adapter.name, 0) + 1
+                return await self._handle_rate_limit(
+                    adapter, policy, rate_check.retry_after_seconds
+                )
+
+        # 3. Call adapter with existing error handling
+        try:
+            facts = await adapter.resolve(
+                query=query,
+                location_name=location_name,
+                location_id=location_id,
+                max_results=max_results,
+            )
+            logger.debug(
+                f"Earth proxy: {adapter.name} resolved {len(facts)} facts for {query}"
+            )
+            return facts
+
+        except Exception as e:
+            return await self._handle_adapter_failure(adapter, policy, e)
+
+    async def _handle_rate_limit(
+        self,
+        adapter: EarthAdapter,
+        policy,
+        retry_after: float,
+    ) -> list[EarthFact]:
+        """Handle rate limit based on fallback policy.
+
+        Args:
+            adapter: The adapter that was rate limited
+            policy: AdapterPolicy with fallback strategy
+            retry_after: Seconds until rate limit resets
+
+        Returns:
+            list[EarthFact]: Empty list (future: USE_STALE could return cached content)
+        """
+        if policy.fallback == FallbackBehavior.LOG_WARNING:
+            logger.warning(
+                f"Adapter {adapter.name} rate limited, retry after {retry_after:.1f}s "
+                f"(total rate limits: {self._rate_limited_count.get(adapter.name, 0)})"
+            )
+        elif policy.fallback == FallbackBehavior.SKIP:
+            # Silent skip
+            pass
+        elif policy.fallback == FallbackBehavior.USE_STALE:
+            # Future: attempt to retrieve stale cache
+            logger.warning(
+                f"Adapter {adapter.name} rate limited, USE_STALE not yet implemented"
+            )
+        # RETRY_AFTER not implemented (would block)
+
+        return []
+
+    async def _handle_adapter_failure(
+        self,
+        adapter: EarthAdapter,
+        policy,
+        error: Exception,
+    ) -> list[EarthFact]:
+        """Handle adapter failure based on fallback policy.
+
+        Args:
+            adapter: The adapter that failed
+            policy: AdapterPolicy with fallback strategy
+            error: The exception that was raised
+
+        Returns:
+            list[EarthFact]: Empty list (future: USE_STALE could return cached content)
+        """
+        if policy.fallback == FallbackBehavior.LOG_WARNING:
+            logger.warning(f"Earth proxy: adapter {adapter.name} failed: {error}")
+        elif policy.fallback == FallbackBehavior.SKIP:
+            # Silent skip
+            pass
+        elif policy.fallback == FallbackBehavior.USE_STALE:
+            # Future: attempt to retrieve stale cache
+            logger.debug(f"Adapter {adapter.name} failed, USE_STALE not yet implemented")
+        # RETRY_AFTER not applicable to failures
+
+        return []
 
     # ------------------------------------------------------------------
     # Storage layer — Redis when available, in-memory fallback otherwise

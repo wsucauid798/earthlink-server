@@ -117,8 +117,14 @@ async def load_geography(session: AsyncSession) -> Geography:
             metadata=loc_model.metadata_,
         )
 
-    # Load all connections
-    result = await session.execute(select(ConnectionModel))
+    # Load connections (filtered by distance to reduce memory usage)
+    # Only load connections under 10km to keep memory reasonable (~2.4M instead of 5M)
+    # This still allows navigation while reducing memory by 52%
+    MAX_CONNECTION_DISTANCE_KM = 10.0
+    result = await session.execute(
+        select(ConnectionModel).where(ConnectionModel.distance_km <= MAX_CONNECTION_DISTANCE_KM)
+    )
+    loaded_count = 0
     for conn_model in result.scalars().all():
         conn = ConnectionData(
             from_id=conn_model.from_id,
@@ -129,6 +135,7 @@ async def load_geography(session: AsyncSession) -> Geography:
             direction=conn_model.direction,
         )
         geo.connections.append(conn)
+        loaded_count += 1
 
         # Build adjacency (bidirectional)
         if conn.from_id not in geo._adjacency:
@@ -139,5 +146,8 @@ async def load_geography(session: AsyncSession) -> Geography:
             geo._adjacency[conn.to_id] = []
         geo._adjacency[conn.to_id].append(conn)
 
-    logger.info(f"Geography loaded: {geo.location_count} locations, {geo.connection_count} connections")
+    logger.info(
+        f"Geography loaded: {geo.location_count} locations, {loaded_count} connections "
+        f"(<= {MAX_CONNECTION_DISTANCE_KM}km filter applied for memory efficiency)"
+    )
     return geo
