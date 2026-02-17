@@ -46,6 +46,7 @@ class Location(Base):
     )
     weather_data = relationship("WeatherData", back_populates="location")
     astronomy_data = relationship("AstronomyData", back_populates="location")
+    wind_data = relationship("WindData", back_populates="location")
 
 
 class LocationConnection(Base):
@@ -90,12 +91,52 @@ class AstronomyData(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False, index=True)
     date = Column(Date, nullable=False, index=True)
+
+    # Sun
     sunrise = Column(DateTime, nullable=True)
     sunset = Column(DateTime, nullable=True)
+    solar_noon = Column(DateTime, nullable=True)
     day_length_hours = Column(Float, nullable=True)
+
+    # Twilight
+    civil_dawn = Column(DateTime, nullable=True)
+    civil_dusk = Column(DateTime, nullable=True)
+    nautical_dawn = Column(DateTime, nullable=True)
+    nautical_dusk = Column(DateTime, nullable=True)
+
+    # Moon
+    moon_phase = Column(Float, nullable=True)              # 0.0–1.0
+    moon_illumination_pct = Column(Float, nullable=True)   # 0–100
+    moon_age_days = Column(Float, nullable=True)           # days since new moon
+    moonrise = Column(DateTime, nullable=True)
+    moonset = Column(DateTime, nullable=True)
 
     # Relationships
     location = relationship("Location", back_populates="astronomy_data")
+
+
+class WindData(Base):
+    __tablename__ = "wind_data"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=False, index=True)
+    datetime = Column(DateTime, nullable=False, index=True)
+
+    # Surface (10m)
+    wind_speed_10m = Column(Float, nullable=True)       # km/h
+    wind_direction_10m = Column(Float, nullable=True)    # degrees (0=N, 90=E, 180=S, 270=W)
+    wind_gusts_10m = Column(Float, nullable=True)        # km/h
+
+    # Upper level (80m for forecast, 100m for historical)
+    wind_speed_upper = Column(Float, nullable=True)      # km/h
+    wind_direction_upper = Column(Float, nullable=True)   # degrees
+    upper_height_m = Column(Integer, nullable=True)       # 80 or 100
+
+    # Atmospheric context
+    pressure_hpa = Column(Float, nullable=True)
+
+    # Relationships
+    location = relationship("Location", back_populates="wind_data")
 
 
 class WorldState(Base):

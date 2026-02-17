@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -18,8 +19,16 @@ async def lifespan(app: FastAPI):
     # Startup: ensure tables exist, load and start the world
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    for attempt in range(1, 6):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            break
+        except Exception as exc:
+            if attempt == 5:
+                raise
+            logger.warning("Database not ready (%s), retrying in %ds...", exc, attempt * 2)
+            await asyncio.sleep(attempt * 2)
 
     world = World()
     await world.load()

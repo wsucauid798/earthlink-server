@@ -14,6 +14,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.models import AstronomyData as AstronomyModel
+from world.celestial import (
+    julian_day_from_datetime,
+    moon_age,
+    moon_illumination,
+    moon_phase,
+    moon_phase_emoji,
+    moon_phase_name,
+    moonrise_moonset,
+    season_from_ecliptic_longitude,
+    solar_ecliptic_longitude,
+    solar_noon_time,
+    solar_position,
+    sunrise_sunset,
+    twilight_times,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +36,31 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AstronomyState:
     """Astronomical state at a location for a given date."""
+    # Sun (existing)
     sunrise: datetime | None = None
     sunset: datetime | None = None
     day_length_hours: float | None = None
     is_daylight: bool = True
+
+    # Sun (expanded)
+    solar_noon: datetime | None = None
+    solar_elevation_deg: float | None = None
+    solar_azimuth_deg: float | None = None
+
+    # Twilight
+    civil_dawn: datetime | None = None
+    civil_dusk: datetime | None = None
+    nautical_dawn: datetime | None = None
+    nautical_dusk: datetime | None = None
+
+    # Moon
+    moon_phase: float | None = None
+    moon_phase_name: str | None = None
+    moon_phase_emoji: str | None = None
+    moon_illumination_pct: float | None = None
+    moon_age_days: float | None = None
+    moonrise: datetime | None = None
+    moonset: datetime | None = None
 
 
 @dataclass
@@ -92,16 +128,15 @@ class TimeSystem:
 
     @property
     def season(self) -> str:
-        """Current season based on month (Northern Hemisphere)."""
-        month = self.current_time.month
-        if month in (3, 4, 5):
-            return "spring"
-        elif month in (6, 7, 8):
-            return "summer"
-        elif month in (9, 10, 11):
-            return "autumn"
-        else:
-            return "winter"
+        """Current season from Earth's orbital position (Northern Hemisphere).
+
+        Derived from the Sun's ecliptic longitude — the same orbital
+        mechanics that drive the real seasons on Earth.
+        """
+        jd = julian_day_from_datetime(self.current_time.replace(tzinfo=None))
+        lon = solar_ecliptic_longitude(jd)
+        name, _, _, _ = season_from_ecliptic_longitude(lon)
+        return name.lower()
 
     def sync(self) -> None:
         """Sync the world clock to real Earth time (UTC)."""
@@ -112,8 +147,12 @@ class TimeSystem:
         self.sync()
         self.tick_count += 1
 
-    def get_astronomy(self, location_id: int) -> AstronomyState | None:
-        """Get the astronomical state at a location for the current date."""
+    def get_astronomy(self, location_id: int, lat: float | None = None, lng: float | None = None) -> AstronomyState | None:
+        """Get the astronomical state at a location for the current date.
+
+        If lat/lng are provided, also computes real-time solar elevation
+        and azimuth (these change continuously, unlike daily fields).
+        """
         date_key = self.current_time.date().isoformat()
         loc_data = self._astronomy.get(location_id, {})
         state = loc_data.get(date_key)
@@ -123,6 +162,13 @@ class TimeSystem:
             # sunrise/sunset from math are naive; current_time is timezone-aware (UTC).
             now_naive = self.current_time.replace(tzinfo=None)
             state.is_daylight = state.sunrise <= now_naive <= state.sunset
+
+        # Compute real-time solar position if coordinates available
+        if state and lat is not None and lng is not None:
+            now_naive = self.current_time.replace(tzinfo=None)
+            elev, az = solar_position(lat, lng, now_naive)
+            state.solar_elevation_deg = elev
+            state.solar_azimuth_deg = az
 
         return state
 
@@ -148,16 +194,28 @@ class TimeSystem:
                     sunrise=row.sunrise,
                     sunset=row.sunset,
                     day_length_hours=row.day_length_hours,
+                    solar_noon=getattr(row, "solar_noon", None),
+                    civil_dawn=getattr(row, "civil_dawn", None),
+                    civil_dusk=getattr(row, "civil_dusk", None),
+                    nautical_dawn=getattr(row, "nautical_dawn", None),
+                    nautical_dusk=getattr(row, "nautical_dusk", None),
+                    moon_phase=getattr(row, "moon_phase", None),
+                    moon_illumination_pct=getattr(row, "moon_illumination_pct", None),
+                    moon_age_days=getattr(row, "moon_age_days", None),
+                    moonrise=getattr(row, "moonrise", None),
+                    moonset=getattr(row, "moonset", None),
+                    moon_phase_name=moon_phase_name(row.moon_phase) if getattr(row, "moon_phase", None) is not None else None,
+                    moon_phase_emoji=moon_phase_emoji(row.moon_phase) if getattr(row, "moon_phase", None) is not None else None,
                 )
             self._astronomy[loc_id] = loc_data
 
         logger.info(f"Loaded astronomy data for {len(location_ids)} locations")
 
     def refresh_astronomy(self, locations: list[tuple[int, float, float]]) -> int:
-        """Recompute astronomy (sunrise/sunset) for the current date from math.
+        """Recompute all astronomy for the current date from celestial math.
 
-        Pure computation — no DB, no API. Uses the same algorithms as
-        data_acquisition/fetch_astronomy.py.
+        Pure computation — no DB, no API. Uses Jean Meeus algorithms
+        from world/celestial.py.
 
         Args:
             locations: list of (location_id, lat, lng) tuples
@@ -165,16 +223,32 @@ class TimeSystem:
         Returns:
             Number of locations refreshed.
         """
-        from data_acquisition.fetch_astronomy import sunrise_sunset
-
         today = self.current_time.date()
+        now_naive = self.current_time.replace(tzinfo=None)
         refreshed = 0
 
+        # Moon phase/age/illumination are the same globally for a given moment
+        m_phase = moon_phase(now_naive)
+        m_name = moon_phase_name(m_phase)
+        m_emoji = moon_phase_emoji(m_phase)
+        m_illum = moon_illumination(now_naive)
+        m_age = moon_age(now_naive)
+
         for loc_id, lat, lng in locations:
+            # Sun
             rise, sett = sunrise_sunset(lat, lng, today)
             day_length = None
             if rise and sett:
                 day_length = round((sett - rise).total_seconds() / 3600, 2)
+
+            noon = solar_noon_time(lat, lng, today)
+
+            # Twilight
+            civil_dawn, civil_dusk = twilight_times(lat, lng, today, 96.0)
+            nautical_dawn, nautical_dusk = twilight_times(lat, lng, today, 102.0)
+
+            # Moon rise/set (location-dependent)
+            m_rise, m_set = moonrise_moonset(lat, lng, today)
 
             if loc_id not in self._astronomy:
                 self._astronomy[loc_id] = {}
@@ -183,11 +257,26 @@ class TimeSystem:
                 sunrise=rise,
                 sunset=sett,
                 day_length_hours=day_length,
+                solar_noon=noon,
+                civil_dawn=civil_dawn,
+                civil_dusk=civil_dusk,
+                nautical_dawn=nautical_dawn,
+                nautical_dusk=nautical_dusk,
+                moon_phase=m_phase,
+                moon_phase_name=m_name,
+                moon_phase_emoji=m_emoji,
+                moon_illumination_pct=m_illum,
+                moon_age_days=m_age,
+                moonrise=m_rise,
+                moonset=m_set,
             )
             refreshed += 1
 
         if refreshed > 0:
-            logger.info(f"Astronomy refreshed: {refreshed} locations for {today}")
+            logger.info(
+                f"Astronomy refreshed: {refreshed} locations for {today} "
+                f"(moon: {m_name} {m_illum:.0f}%)"
+            )
 
         return refreshed
 

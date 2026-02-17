@@ -1,7 +1,7 @@
 """
 The World.
 
-Bootstraps geography, weather, and time from the database.
+Bootstraps geography, weather, wind, and time from the database.
 Ticks forward independently. Knows nothing about agents.
 """
 
@@ -20,7 +20,12 @@ from .config import RefreshPolicy, WorldConfig
 from .geography import Geography, load_geography
 from .time_system import TimeSystem
 from .weather import Weather
+from .wind import Wind
+from .atmosphere import Atmosphere
 from .earth_proxy import EarthProxy
+from .geophysics import Geophysics
+from .orbital import Orbital
+from .data_feeds import DataFeeds
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +43,12 @@ class World:
         self.config = config or WorldConfig()
         self.geography: Geography | None = None
         self.weather: Weather | None = None
+        self.wind: Wind | None = None
+        self.atmosphere: Atmosphere = Atmosphere()
         self.time: TimeSystem | None = None
+        self.geophysics: Geophysics = Geophysics()
+        self.orbital: Orbital = Orbital()
+        self.data_feeds: DataFeeds = DataFeeds()
         self.earth_proxy: EarthProxy | None = None
         self.agents: AgentSystem | None = None
         self._running = False
@@ -47,6 +57,7 @@ class World:
         self._last_refresh: dict[str, datetime] = {}
         self._refresh_counts: dict[str, int] = {}
         self._tick_callbacks: list = []
+        self._refreshed_domains: set[str] = set()  # domains refreshed since last tick
 
     @property
     def is_running(self) -> bool:
@@ -98,12 +109,28 @@ class World:
             # Load astronomy
             await self.time.load_astronomy(session, weather_location_ids)
 
+            # Select wind stations — broader geographic coverage than weather
+            wind_station_ids = self._select_wind_stations(
+                self.geography, self.config.wind_station_count
+            )
+
+            # Load wind
+            self.wind = Wind()
+            await self.wind.load_history(session, wind_station_ids)
+
             # Restore agents if previously persisted
             persisted_agents_result = await session.execute(select(AgentState).order_by(AgentState.id))
             persisted_agents = persisted_agents_result.scalars().all()
 
-        # Set initial weather state
+        # Set initial weather and wind state
         self.weather.update(self.time.current_time)
+        self.wind.update(self.time.current_time)
+
+        # Populate wind station coordinates for interpolation
+        for loc_id in self.wind._history:
+            loc = self.geography.get_location(loc_id)
+            if loc:
+                self.wind._station_coords[loc_id] = (loc.lat, loc.lng, loc.terrain)
 
         from agents.system import AgentSystem
 
@@ -219,13 +246,21 @@ class World:
                 self.time.current_time,
                 tick_count=self.time.tick_count,
                 earth_proxy=self.earth_proxy,
+                wind=self.wind,
             )
 
-        # Build tick summary
+        # Build tick summary — include which domains were refreshed since last tick
+        refreshed = self._refreshed_domains.copy()
+        self._refreshed_domains.clear()
+
         tick_data = {
             "tick": self.time.tick_count,
             "time": self.time.to_dict(),
-            "weather_updated": False,  # Weather refreshed by background scheduler, not per-tick
+            "weather_updated": "weather" in refreshed,
+            "wind_updated": "wind" in refreshed,
+            "atmosphere_updated": "atmosphere" in refreshed,
+            "astronomy_updated": "astronomy" in refreshed,
+            "data_feeds_updated": "data_feeds" in refreshed,
             "agent_events": agent_events,
             "earth_proxy_resolves": self.earth_proxy.total_resolves if self.earth_proxy else 0,
         }
@@ -286,6 +321,9 @@ class World:
         self.time.sync()
         self.time.tick_count = 0
         self.weather.update(self.time.current_time)
+        if self.wind:
+            self.wind.update(self.time.current_time)
+        self.atmosphere._current.clear()
         from agents.system import AgentSystem
         self.agents = AgentSystem.bootstrap(
             geography=self.geography,
@@ -328,13 +366,25 @@ class World:
             self._refresh_tasks["weather"] = asyncio.create_task(
                 self._refresh_loop("weather", policies.weather, self._refresh_weather)
             )
+        if policies.wind.enabled:
+            self._refresh_tasks["wind"] = asyncio.create_task(
+                self._refresh_loop("wind", policies.wind, self._refresh_wind)
+            )
         if policies.astronomy.enabled:
             self._refresh_tasks["astronomy"] = asyncio.create_task(
                 self._refresh_loop("astronomy", policies.astronomy, self._refresh_astronomy)
             )
+        if policies.atmosphere.enabled:
+            self._refresh_tasks["atmosphere"] = asyncio.create_task(
+                self._refresh_loop("atmosphere", policies.atmosphere, self._refresh_atmosphere)
+            )
         if policies.geography.enabled:
             self._refresh_tasks["geography"] = asyncio.create_task(
                 self._refresh_loop("geography", policies.geography, self._refresh_geography)
+            )
+        if policies.data_feeds.enabled:
+            self._refresh_tasks["data_feeds"] = asyncio.create_task(
+                self._refresh_loop("data_feeds", policies.data_feeds, self._refresh_data_feeds)
             )
 
     async def _refresh_loop(self, domain: str, policy: RefreshPolicy, action) -> None:
@@ -347,6 +397,7 @@ class World:
             await action()
             self._last_refresh[domain] = datetime.now(timezone.utc)
             self._refresh_counts[domain] = self._refresh_counts.get(domain, 0) + 1
+            self._refreshed_domains.add(domain)
         except Exception as e:
             logger.error(f"Initial refresh [{domain}] failed: {e}")
 
@@ -356,6 +407,7 @@ class World:
                 await action()
                 self._last_refresh[domain] = datetime.now(timezone.utc)
                 self._refresh_counts[domain] = self._refresh_counts.get(domain, 0) + 1
+                self._refreshed_domains.add(domain)
             except Exception as e:
                 logger.error(f"Refresh [{domain}] failed: {e}")
 
@@ -386,11 +438,42 @@ class World:
         if locations:
             await self.weather.refresh(locations)
 
+    def _tracked_wind_locations(self) -> list[tuple[int, float, float, str | None]]:
+        """Build (location_id, lat, lng, terrain) list for wind stations."""
+        if not self.geography or not self.wind:
+            return []
+        return [
+            (
+                loc_id,
+                self.geography.locations[loc_id].lat,
+                self.geography.locations[loc_id].lng,
+                self.geography.locations[loc_id].terrain,
+            )
+            for loc_id in self.wind._history
+            if loc_id in self.geography.locations
+        ]
+
+    async def _refresh_wind(self) -> None:
+        """Refresh wind: fetch live current conditions from Open-Meteo."""
+        locations = self._tracked_wind_locations()
+        if locations:
+            await self.wind.refresh(locations)
+
+    async def _refresh_atmosphere(self) -> None:
+        """Refresh atmosphere: fetch air quality from Open-Meteo AQ API."""
+        locations = self._tracked_locations()
+        if locations:
+            await self.atmosphere.refresh(locations)
+
     async def _refresh_astronomy(self) -> None:
         """Refresh astronomy: recompute sunrise/sunset for today from math."""
         locations = self._tracked_locations()
         if locations:
             self.time.refresh_astronomy(locations)
+
+    async def _refresh_data_feeds(self) -> None:
+        """Refresh world data feeds (solar activity from NOAA SWPC)."""
+        await self.data_feeds.refresh()
 
     async def _refresh_geography(self) -> None:
         """Refresh geography: reload locations and connections from the database."""
@@ -400,6 +483,95 @@ class World:
             f"Geography refreshed: {self.geography.location_count} locations, "
             f"{self.geography.connection_count} connections"
         )
+
+    @staticmethod
+    def _select_wind_stations(geography: Geography, count: int) -> list[int]:
+        """Select wind station locations with broad geographic coverage.
+
+        Strategy:
+        1. Start with top locations by population (overlap with weather stations).
+        2. Fill geographic gaps using a grid over the UK/Ireland bounding box.
+        3. Prefer terrain diversity (highland, water, woodland) in gap-filling.
+        """
+        if not geography.locations:
+            return []
+
+        # Candidates: populated places with coordinates
+        candidates = [
+            loc for loc in geography.locations.values()
+            if loc.type in ("capital", "city", "town", "village", "settlement")
+            and loc.population and loc.population > 0
+        ]
+        if not candidates:
+            # Fallback: any location with population
+            candidates = [
+                loc for loc in geography.locations.values()
+                if loc.population and loc.population > 0
+            ]
+
+        # Phase 1: top locations by population (matches weather station selection)
+        by_pop = sorted(candidates, key=lambda l: l.population or 0, reverse=True)
+        selected_ids: list[int] = [loc.id for loc in by_pop[:min(50, count)]]
+        selected_set = set(selected_ids)
+
+        if len(selected_ids) >= count:
+            return selected_ids[:count]
+
+        # Phase 2: geographic grid fill
+        # UK/Ireland bounding box: ~49.5N to 60.5N, ~11W to 2E
+        LAT_MIN, LAT_MAX = 49.5, 60.5
+        LNG_MIN, LNG_MAX = -11.0, 2.0
+        GRID_ROWS, GRID_COLS = 10, 10
+        lat_step = (LAT_MAX - LAT_MIN) / GRID_ROWS
+        lng_step = (LNG_MAX - LNG_MIN) / GRID_COLS
+
+        # Preferred terrain types for gap-filling (interesting wind behaviour)
+        preferred_terrain = {"highland", "water", "woodland"}
+
+        remaining = [c for c in candidates if c.id not in selected_set]
+
+        for row in range(GRID_ROWS):
+            if len(selected_ids) >= count:
+                break
+            for col in range(GRID_COLS):
+                if len(selected_ids) >= count:
+                    break
+
+                cell_lat_min = LAT_MIN + row * lat_step
+                cell_lat_max = cell_lat_min + lat_step
+                cell_lng_min = LNG_MIN + col * lng_step
+                cell_lng_max = cell_lng_min + lng_step
+
+                # Check if any selected station already covers this cell
+                has_station = any(
+                    cell_lat_min <= geography.locations[sid].lat < cell_lat_max
+                    and cell_lng_min <= geography.locations[sid].lng < cell_lng_max
+                    for sid in selected_ids
+                    if sid in geography.locations
+                )
+                if has_station:
+                    continue
+
+                # Find candidates in this cell
+                in_cell = [
+                    loc for loc in remaining
+                    if cell_lat_min <= loc.lat < cell_lat_max
+                    and cell_lng_min <= loc.lng < cell_lng_max
+                    and loc.id not in selected_set
+                ]
+                if not in_cell:
+                    continue
+
+                # Prefer interesting terrain, then highest population
+                preferred = [l for l in in_cell if l.terrain in preferred_terrain]
+                pick = max(
+                    preferred if preferred else in_cell,
+                    key=lambda l: l.population or 0,
+                )
+                selected_ids.append(pick.id)
+                selected_set.add(pick.id)
+
+        return selected_ids[:count]
 
     async def _save_state(self) -> None:
         """Persist the current world state to the database."""
@@ -470,13 +642,44 @@ class World:
                         "is_daylight": self.time.is_daytime(loc_id),
                     }
 
+        # Earth geography statistics
+        location_types: dict[str, int] = {}
+        regions: dict[str, int] = {}
+        countries: dict[str, int] = {}
+        total_population = 0
+        elevations: list[float] = []
+        if self.geography:
+            for loc in self.geography.locations.values():
+                # Only count types with proper human-readable names (skip single-letter GeoNames codes)
+                if loc.type and len(loc.type) > 1:
+                    location_types[loc.type] = location_types.get(loc.type, 0) + 1
+                # Skip garbage region codes (e.g. "00")
+                if loc.admin_level_2 and not loc.admin_level_2.isdigit():
+                    regions[loc.admin_level_2] = regions.get(loc.admin_level_2, 0) + 1
+                if loc.admin_level_1:
+                    countries[loc.admin_level_1] = countries.get(loc.admin_level_1, 0) + 1
+                if loc.population and loc.population > 0:
+                    total_population += loc.population
+                # Filter GeoNames sentinel (-9999) and unreasonable values
+                if loc.elevation is not None and -500 < loc.elevation < 9000:
+                    elevations.append(loc.elevation)
+
         return {
             "time": self.time.to_dict() if self.time else None,
             "is_running": self._running,
             "location_count": self.geography.location_count if self.geography else 0,
             "connection_count": self.geography.connection_count if self.geography else 0,
             "weather_stations": len(weather_summary),
+            "wind_stations": self.wind.station_count if self.wind else 0,
             "weather": weather_summary,
+            "geography_stats": {
+                "location_types": dict(sorted(location_types.items(), key=lambda x: -x[1])),
+                "countries": dict(sorted(countries.items(), key=lambda x: -x[1])),
+                "regions": dict(sorted(regions.items(), key=lambda x: -x[1])),
+                "total_population": total_population,
+                "elevation_min": round(min(elevations), 1) if elevations else None,
+                "elevation_max": round(max(elevations), 1) if elevations else None,
+            },
             "refresh": {
                 domain: {
                     "enabled": policy.enabled,
@@ -487,8 +690,11 @@ class World:
                 }
                 for domain, policy in [
                     ("weather", self.config.refresh.weather),
+                    ("wind", self.config.refresh.wind),
+                    ("atmosphere", self.config.refresh.atmosphere),
                     ("astronomy", self.config.refresh.astronomy),
                     ("geography", self.config.refresh.geography),
+                    ("data_feeds", self.config.refresh.data_feeds),
                 ]
             },
             "agent_count": len(self.agents.agents) if self.agents else 0,

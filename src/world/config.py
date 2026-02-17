@@ -20,8 +20,11 @@ class RefreshPolicies(BaseModel):
     Each domain gets a policy. The world enforces them.
     """
     weather: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=30)
+    wind: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=30)
     astronomy: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=1440)  # daily
+    atmosphere: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=30)
     geography: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=10080)  # weekly
+    data_feeds: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=30)
 
 
 class FallbackBehavior(str, Enum):
@@ -150,6 +153,9 @@ class WorldConfig(BaseModel):
 
     # Adapter policies — control over Earth adapter behavior (rate limits, caching, fallback)
     adapters: AdapterPolicies = AdapterPolicies()
+
+    # Wind system
+    wind_station_count: int = 100  # Number of wind monitoring stations
 
     # Autonomous agents
     agent_count: int = 45

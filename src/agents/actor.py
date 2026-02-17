@@ -49,6 +49,7 @@ class _AgentActorImpl:
         sim_time: datetime,
         tick_count: int | None,
         earth_facts_map: dict,
+        wind=None,
     ) -> dict:
         """Run one full agent tick: perceive → decide → act → learn.
 
@@ -60,6 +61,7 @@ class _AgentActorImpl:
             earth_facts_map: {location_id: [EarthFact, ...]} for all
                 resolved locations. The actor looks up facts for its
                 current and post-move locations.
+            wind: Wind object (resolved from ObjectRef), or None.
 
         Returns:
             Event dict for this tick.
@@ -69,7 +71,7 @@ class _AgentActorImpl:
         # Pre-move perception with earth facts for current location
         current_earth_facts = earth_facts_map.get(agent.location_id, [])
         observation = agent.perceive(
-            geography, weather, sim_time, earth_facts=current_earth_facts,
+            geography, weather, sim_time, earth_facts=current_earth_facts, wind=wind,
         )
         agent.refresh_goal(observation, geography, self._rng)
         next_location = agent.choose_next_location(
@@ -81,7 +83,7 @@ class _AgentActorImpl:
         # Post-move perception
         post_earth_facts = earth_facts_map.get(agent.location_id, [])
         next_observation = agent.perceive(
-            geography, weather, sim_time, earth_facts=post_earth_facts,
+            geography, weather, sim_time, earth_facts=post_earth_facts, wind=wind,
         )
         agent.learn(next_observation, tick_count=tick_count)
 

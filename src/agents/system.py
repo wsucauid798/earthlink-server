@@ -22,6 +22,7 @@ from typing import ClassVar, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from world.earth_proxy import EarthProxy
+    from world.wind import Wind, WindState
 
 from .retrieval import ChromaFactStore, SemanticFactRetriever
 
@@ -197,6 +198,7 @@ class AgentObservation:
 
     current_location: LocationData
     current_weather: WeatherState | None
+    current_wind: WindState | None
     neighbour_ids: list[int]
     simulation_time: datetime
     earth_facts: list = field(default_factory=list)  # civilisation content at this location
@@ -272,16 +274,27 @@ class AutonomousAgent:
         "coordinates",
     }
 
-    def perceive(self, geography: Geography, weather: Weather, sim_time: datetime, earth_facts: list | None = None) -> AgentObservation:
+    def perceive(self, geography: Geography, weather: Weather, sim_time: datetime, earth_facts: list | None = None, wind: Wind | None = None) -> AgentObservation:
         """Perceive the world. The world presents everything — geography, weather,
-        civilisation — as one seamless environment. The agent just sees Earth."""
+        wind, civilisation — as one seamless environment. The agent just sees Earth."""
         current_location = geography.get_location(self.location_id)
         if current_location is None:
             current_location = next(iter(geography.locations.values()))
             self.location_id = current_location.id
+
+        wind_state = None
+        if wind:
+            wind_state = wind.get_wind(
+                self.location_id,
+                lat=current_location.lat,
+                lng=current_location.lng,
+                terrain=current_location.terrain,
+            )
+
         return AgentObservation(
             current_location=current_location,
             current_weather=weather.get_weather(self.location_id),
+            current_wind=wind_state,
             neighbour_ids=[
                 conn.to_id if conn.from_id == self.location_id else conn.from_id
                 for conn in geography.get_neighbours(self.location_id)
@@ -297,7 +310,12 @@ class AutonomousAgent:
         state_id = observation.current_location.id
         self._last_state_id = state_id
 
-        if self.current_goal and self.current_goal.kind == "recover" and self.energy < 70:
+        if self.current_goal and self.current_goal.kind == "recover" and self.energy < 80:
+            self._last_action_id = self.location_id
+            return self.location_id
+
+        # Proactive rest: agents occasionally stop to observe when energy is below full
+        if self.energy < 75 and rng.random() < 0.15:
             self._last_action_id = self.location_id
             return self.location_id
 
@@ -331,7 +349,10 @@ class AutonomousAgent:
 
     def apply_action(self, new_location_id: int, geography: Geography) -> None:
         if new_location_id == self.location_id:
-            self.last_action = "wait"
+            if self.current_goal and self.current_goal.kind == "recover":
+                self.last_action = "rest"
+            else:
+                self.last_action = "observe"
             self.last_move_distance_km = 0.0
             return
 
@@ -343,7 +364,7 @@ class AutonomousAgent:
                 break
         self.location_id = new_location_id
         self.last_move_distance_km = distance_km
-        self.last_action = f"move:{previous}->{new_location_id}"
+        self.last_action = "move"
 
     def learn(self, next_observation: AgentObservation, tick_count: int | None = None) -> None:
         self._ingest_observation(next_observation, tick_count=tick_count)
@@ -375,7 +396,7 @@ class AutonomousAgent:
             key = next_observation.current_weather.conditions.lower()
             self.knowledge.condition_counts[key] = self.knowledge.condition_counts.get(key, 0) + 1
 
-        if self.last_action == "wait":
+        if self.last_action in ("rest", "observe"):
             self.energy = min(100.0, self.energy + 3.0)
         else:
             distance_penalty = max(1.0, self.last_move_distance_km * 0.05)
@@ -1130,12 +1151,12 @@ class AutonomousAgent:
     def refresh_goal(self, observation: AgentObservation, geography: Geography, rng: random.Random) -> None:
         self.goal_age_ticks += 1
 
-        if self.energy < 25:
+        if self.energy < 50:
             self.current_goal = AgentGoal(kind="recover", target_location_id=self.location_id, priority=1.0)
             self.goal_age_ticks = 0
             return
 
-        if self.current_goal and self.current_goal.kind == "recover" and self.energy >= 75:
+        if self.current_goal and self.current_goal.kind == "recover" and self.energy >= 85:
             self.current_goal = None
 
         if self.current_goal and self.current_goal.target_location_id == self.location_id:
@@ -1517,22 +1538,22 @@ class AgentSystem:
 
         return cls(agents=agents, _rng=rng)
 
-    async def tick(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None) -> list[dict]:
+    async def tick(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None) -> list[dict]:
         """Tick all agents. Dispatches to Ray (parallel) or sequential path."""
         if self._use_ray:
-            return await self._tick_ray(geography, weather, sim_time, tick_count, earth_proxy)
-        return await self._tick_sequential(geography, weather, sim_time, tick_count, earth_proxy)
+            return await self._tick_ray(geography, weather, sim_time, tick_count, earth_proxy, wind)
+        return await self._tick_sequential(geography, weather, sim_time, tick_count, earth_proxy, wind)
 
     # --- Sequential tick (original logic) ---------------------------------
 
-    async def _tick_sequential(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None) -> list[dict]:
+    async def _tick_sequential(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None) -> list[dict]:
         events: list[dict] = []
         for agent in self.agents:
             earth_facts = []
             if earth_proxy and await earth_proxy.is_location_resolved(agent.location_id):
                 earth_facts = await earth_proxy.get_resolved_facts(agent.location_id)
 
-            observation = agent.perceive(geography, weather, sim_time, earth_facts=earth_facts)
+            observation = agent.perceive(geography, weather, sim_time, earth_facts=earth_facts, wind=wind)
 
             # Ingest earth facts for current location BEFORE moving.
             # The world resolved this location at the start of the tick,
@@ -1552,7 +1573,7 @@ class AgentSystem:
             if earth_proxy and await earth_proxy.is_location_resolved(agent.location_id):
                 next_earth_facts = await earth_proxy.get_resolved_facts(agent.location_id)
 
-            next_observation = agent.perceive(geography, weather, sim_time, earth_facts=next_earth_facts)
+            next_observation = agent.perceive(geography, weather, sim_time, earth_facts=next_earth_facts, wind=wind)
             agent.learn(next_observation, tick_count=tick_count)
 
             q_value = 0.0
@@ -1577,7 +1598,7 @@ class AgentSystem:
 
     # --- Ray parallel tick ------------------------------------------------
 
-    async def _tick_ray(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None) -> list[dict]:
+    async def _tick_ray(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None) -> list[dict]:
         """Fan out tick to all Ray actors in parallel, then coordinate social learning."""
         import asyncio
         import ray as _ray
@@ -1595,11 +1616,12 @@ class AgentSystem:
         # 2. Put shared state in object store (zero-copy on same node)
         geo_ref = _ray.put(geography)
         weather_ref = _ray.put(weather)
+        wind_ref = _ray.put(wind)
         facts_ref = _ray.put(earth_facts_map)
 
         # 3. Fan out tick to all actors — true parallelism
         futures = [
-            actor.tick.remote(geo_ref, weather_ref, sim_time, tick_count, facts_ref)
+            actor.tick.remote(geo_ref, weather_ref, sim_time, tick_count, facts_ref, wind_ref)
             for actor in self._actors
         ]
 
