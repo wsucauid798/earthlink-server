@@ -19,6 +19,7 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "numpy>=1.26.0",
     "tzdata>=2024.1",
+    "timezonefinder>=6.0.0",
 ]
 
 [project.optional-dependencies]

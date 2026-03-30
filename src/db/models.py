@@ -156,6 +156,7 @@ class AgentState(Base):
     location_id = Column(Integer, ForeignKey("locations.id"), nullable=False, index=True)
     energy = Column(Float, nullable=False, default=100.0)
     last_move_distance_km = Column(Float, nullable=False, default=0.0)
+    last_move_connection_type = Column(String(64), nullable=False, default="road")
     last_action = Column(String(255), nullable=False, default="spawned")
 
     learning_rate = Column(Float, nullable=False)

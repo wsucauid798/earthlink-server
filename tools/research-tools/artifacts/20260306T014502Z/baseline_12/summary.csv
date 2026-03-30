@@ -1,0 +1,13 @@
+tick,agent_events,mean_reward,mean_knowledge_score,earth_proxy_resolves,weather_updated,wind_updated,atmosphere_updated,astronomy_updated,data_feeds_updated
+311,0,0.0,0.0,99,False,False,False,False,False
+312,0,0.0,0.0,100,False,False,False,False,False
+313,0,0.0,0.0,100,False,False,False,False,False
+314,0,0.0,0.0,101,False,False,False,False,False
+315,0,0.0,0.0,101,False,False,False,False,False
+316,0,0.0,0.0,102,False,False,False,False,False
+317,0,0.0,0.0,102,True,False,True,False,False
+318,0,0.0,0.0,102,False,False,False,False,False
+319,0,0.0,0.0,103,False,False,False,False,False
+320,0,0.0,0.0,103,False,False,False,False,False
+321,0,0.0,0.0,104,False,False,False,False,False
+322,0,0.0,0.0,104,False,False,False,False,False

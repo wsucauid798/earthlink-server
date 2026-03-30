@@ -8,6 +8,7 @@ from api.schemas import (
     AgentSummarySchema,
     AtmosphereSchema,
     AstronomySchema,
+    EvalSnapshotSchema,
     GeophysicsSchema,
     LocationSchema,
     NearbyLocationSchema,
@@ -441,6 +442,32 @@ async def get_atmosphere(location_id: int):
     )
 
 
+# --- Climate ---
+
+@router.get("/climate/{location_id}")
+async def get_climate(location_id: int):
+    """Get the climate profile for a location.
+
+    Returns monthly temperature/precipitation normals, annual summaries,
+    and Koppen climate classification. Data from Open-Meteo Archive API,
+    cached permanently after first fetch.
+    """
+    world = get_world()
+    loc = world.geography.get_location(location_id) if world.geography else None
+    if not loc:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    if not hasattr(world, "climate") or world.climate is None:
+        from world.climate import Climate
+        world.climate = Climate()
+
+    state = await world.climate.get_climate(location_id, loc.lat, loc.lng)
+    result = state.to_dict()
+    result["location_id"] = location_id
+    result["location_name"] = loc.name
+    return result
+
+
 # --- Orbital ---
 
 @router.get("/orbital", response_model=OrbitalSchema)
@@ -494,9 +521,73 @@ async def get_solar_activity():
 
 @router.get("/time")
 async def get_time():
-    """Get the current world time."""
+    """Get the current world time (global UTC)."""
     world = get_world()
     return world.time.to_dict()
+
+
+@router.get("/time/{location_id}")
+async def get_time_at_location(location_id: int):
+    """Get the current local time at a specific location.
+
+    Returns local time, IANA timezone, offset, abbreviation, and season
+    based on the location's real-world coordinates.
+    """
+    world = get_world()
+    loc = world.geography.get_location(location_id) if world.geography else None
+    if not loc:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    time_info = world.time.time_at(loc.lat, loc.lng)
+    time_info["season"] = world.time.season_at(loc.lat)
+    time_info["location_id"] = location_id
+    time_info["location_name"] = loc.name
+    return time_info
+
+
+@router.get("/rotation")
+async def get_rotation():
+    """Get the current Earth rotation state.
+
+    Returns GMST angle, sub-solar point (lat/lng where the sun is
+    directly overhead), and solar declination. Everything a frontend
+    needs to render globe rotation and day/night terminator.
+    """
+    from datetime import datetime, timezone
+    from world.celestial import earth_rotation_state
+
+    now = datetime.now(timezone.utc)
+    return earth_rotation_state(now)
+
+
+# --- Evaluation Snapshot ---
+
+@router.get("/eval/snapshot", response_model=EvalSnapshotSchema)
+async def eval_snapshot():
+    """Lightweight endpoint for evaluation harnesses.
+
+    Returns current tick, all agent summaries, earth proxy stats,
+    and world config in a single call.
+    """
+    from datetime import datetime, timezone
+
+    world = get_world()
+    agents = world.list_agents()
+    time_dict = world.time.to_dict() if world.time else {}
+    earth_proxy_stats = None
+    if world.earth_proxy:
+        earth_proxy_stats = world.earth_proxy.get_policy_stats()
+
+    return EvalSnapshotSchema(
+        tick=time_dict.get("tick_count", 0),
+        wall_time=datetime.now(timezone.utc).isoformat(),
+        is_running=world.is_running,
+        location_count=len(world.geography.locations) if world.geography else 0,
+        agent_count=len(agents),
+        agents=agents,
+        earth_proxy=earth_proxy_stats,
+        config=world.config.model_dump() if world.config else None,
+    )
 
 
 # --- Simulation Control ---

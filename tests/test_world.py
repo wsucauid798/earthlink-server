@@ -117,7 +117,7 @@ def test_time_system_sync():
 
 def test_time_system_timezone_gmt_bst():
     """Timezone abbreviation should reflect GMT in winter, BST in summer."""
-    ts = TimeSystem(timezone_name="Europe/London")
+    ts = TimeSystem()
 
     # January = GMT
     ts.current_time = datetime(2025, 1, 15, 12, 0, tzinfo=timezone.utc)
@@ -132,25 +132,24 @@ def test_time_system_timezone_gmt_bst():
 
 def test_time_system_local_time_bst():
     """local_time should show BST offset during summer."""
-    ts = TimeSystem(timezone_name="Europe/London")
+    ts = TimeSystem()
     ts.current_time = datetime(2025, 7, 15, 12, 0, tzinfo=timezone.utc)
     assert ts.local_time.hour == 13  # 12:00 UTC = 13:00 BST
 
 
 def test_time_system_local_time_gmt():
     """local_time should match UTC during winter (GMT)."""
-    ts = TimeSystem(timezone_name="Europe/London")
+    ts = TimeSystem()
     ts.current_time = datetime(2025, 1, 15, 12, 0, tzinfo=timezone.utc)
     assert ts.local_time.hour == 12  # 12:00 UTC = 12:00 GMT
 
 
 def test_time_system_to_dict():
     """to_dict should include timezone, local_time, and related fields."""
-    ts = TimeSystem(timezone_name="Europe/London")
+    ts = TimeSystem()
     ts.current_time = datetime(2025, 1, 15, 12, 0, tzinfo=timezone.utc)
     d = ts.to_dict()
-    assert d["timezone"] == "Europe/London"
-    assert d["timezone_abbr"] == "GMT"
+    assert d["timezone"] == "UTC"
     assert d["utc_offset"] == "+00:00"
     assert "local_time" in d
     assert "time_mode" not in d  # No simulated mode — always real
@@ -317,7 +316,7 @@ def test_refresh_policies_custom():
 
 def test_astronomy_refresh_computes_for_today():
     """refresh_astronomy should compute sunrise/sunset for the current date."""
-    ts = TimeSystem(timezone_name="Europe/London")
+    ts = TimeSystem()
 
     # London coordinates
     locations = [(1, 51.5074, -0.1278)]

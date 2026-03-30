@@ -99,6 +99,67 @@ def local_sidereal_time(jd: float, lng: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Earth rotation state
+# ---------------------------------------------------------------------------
+
+def sub_solar_point(dt: datetime) -> tuple[float, float]:
+    """The latitude and longitude where the sun is directly overhead.
+
+    Sub-solar latitude = solar declination.
+    Sub-solar longitude = where solar noon is right now = -(GMST + RA_sun)
+    converted to [-180, 180].
+
+    Args:
+        dt: UTC datetime
+
+    Returns:
+        (latitude_deg, longitude_deg)
+    """
+    jd = julian_day_from_datetime(dt)
+    L, g, obliquity = _sun_mean_elements(jd)
+    ecliptic_lon_rad = radians(L + 1.915 * sin(g) + 0.020 * sin(2 * g))
+
+    # Solar declination = sub-solar latitude
+    decl = degrees(asin(sin(obliquity) * sin(ecliptic_lon_rad)))
+
+    # Solar right ascension
+    ra_deg = degrees(atan2(cos(obliquity) * sin(ecliptic_lon_rad), cos(ecliptic_lon_rad)))
+
+    # Sub-solar longitude: the meridian where local solar time = noon
+    gmst = greenwich_mean_sidereal_time(jd)
+    lng = -(gmst - ra_deg)
+    # Normalise to [-180, 180]
+    lng = ((lng + 180) % 360) - 180
+
+    return decl, lng
+
+
+def earth_rotation_state(dt: datetime) -> dict:
+    """Full Earth rotation state for a given UTC moment.
+
+    Returns everything a frontend needs to render the globe correctly:
+    rotation angle, sub-solar point, solar declination.
+
+    Args:
+        dt: UTC datetime
+
+    Returns:
+        dict with gmst_deg, sub_solar_lat, sub_solar_lng, solar_declination_deg
+    """
+    jd = julian_day_from_datetime(dt)
+    gmst = greenwich_mean_sidereal_time(jd)
+    ss_lat, ss_lng = sub_solar_point(dt)
+    decl = degrees(solar_declination(jd))
+
+    return {
+        "gmst_deg": round(gmst, 4),
+        "sub_solar_lat": round(ss_lat, 4),
+        "sub_solar_lng": round(ss_lng, 4),
+        "solar_declination_deg": round(decl, 4),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Sun: core orbital elements
 # ---------------------------------------------------------------------------
 
@@ -150,28 +211,52 @@ def solar_ecliptic_longitude(jd: float) -> float:
     return lon
 
 
-def season_from_ecliptic_longitude(lon_deg: float) -> tuple[str, float, float, str]:
-    """Determine season from solar ecliptic longitude.
+def season_from_ecliptic_longitude(lon_deg: float, latitude: float = 51.5) -> tuple[str, float, float, str]:
+    """Determine season from solar ecliptic longitude and latitude.
 
-    Northern Hemisphere convention:
-        0-90:    Spring  (vernal equinox -> summer solstice)
-        90-180:  Summer  (summer solstice -> autumnal equinox)
-        180-270: Autumn  (autumnal equinox -> winter solstice)
-        270-360: Winter  (winter solstice -> vernal equinox)
+    Hemisphere-aware:
+        Northern (lat >= 23.5):  Spring/Summer/Autumn/Winter
+        Southern (lat <= -23.5): Seasons are reversed
+        Tropical (|lat| < 23.5): Wet/Dry based on solar declination proximity
 
     Returns:
         (season_name, progress_0_to_1, days_to_next_event, next_event_name)
     """
     lon = lon_deg % 360
     rate = 0.9856  # Sun's mean daily motion (deg/day)
+
+    # Northern hemisphere seasons
     if lon < 90:
-        return "Spring", lon / 90, (90 - lon) / rate, "Summer Solstice"
+        n_season, n_progress = "Spring", lon / 90
+        n_days, n_next = (90 - lon) / rate, "Summer Solstice"
     elif lon < 180:
-        return "Summer", (lon - 90) / 90, (180 - lon) / rate, "Autumnal Equinox"
+        n_season, n_progress = "Summer", (lon - 90) / 90
+        n_days, n_next = (180 - lon) / rate, "Autumnal Equinox"
     elif lon < 270:
-        return "Autumn", (lon - 180) / 90, (270 - lon) / rate, "Winter Solstice"
+        n_season, n_progress = "Autumn", (lon - 180) / 90
+        n_days, n_next = (270 - lon) / rate, "Winter Solstice"
     else:
-        return "Winter", (lon - 270) / 90, (360 - lon) / rate, "Vernal Equinox"
+        n_season, n_progress = "Winter", (lon - 270) / 90
+        n_days, n_next = (360 - lon) / rate, "Vernal Equinox"
+
+    if abs(latitude) < 23.5:
+        # Tropical: wet/dry based on whether sun is near this latitude
+        # Sun declination ranges from -23.4 to +23.4 over the year
+        # When sun is near the location's latitude = wet season (more direct heating)
+        jd_approx = 2451545.0 + lon / rate  # rough JD for this ecliptic longitude
+        decl_deg = degrees(solar_declination(jd_approx))
+        sun_proximity = abs(decl_deg - latitude)
+        if sun_proximity < 20:
+            return "Wet", n_progress, n_days, n_next
+        else:
+            return "Dry", n_progress, n_days, n_next
+    elif latitude < -23.5:
+        # Southern hemisphere: flip seasons
+        flip = {"Spring": "Autumn", "Summer": "Winter", "Autumn": "Spring", "Winter": "Summer"}
+        return flip[n_season], n_progress, n_days, n_next
+    else:
+        # Northern hemisphere
+        return n_season, n_progress, n_days, n_next
 
 
 # ---------------------------------------------------------------------------

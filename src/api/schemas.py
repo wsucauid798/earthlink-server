@@ -226,6 +226,17 @@ class SimulationControlSchema(BaseModel):
     action: str  # "start", "pause", "reset"
 
 
+class EvalSnapshotSchema(BaseModel):
+    tick: int
+    wall_time: str
+    is_running: bool
+    location_count: int
+    agent_count: int
+    agents: list[AgentSummarySchema]
+    earth_proxy: dict | None = None
+    config: dict | None = None
+
+
 class SimulationConfigSchema(BaseModel):
     tick_interval_seconds: float | None = None  # Real seconds between world ticks
 

@@ -17,8 +17,10 @@ source of truth.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time as _time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -69,17 +71,29 @@ class EarthProxy:
 
     adapters: list[EarthAdapter] = field(default_factory=list)
     ttl_seconds: int = DEFAULT_TTL_SECONDS
-    policies: AdapterPolicies = field(default_factory=AdapterPolicies)  # NEW
+    policies: AdapterPolicies = field(default_factory=AdapterPolicies)
+    default_timeout_seconds: float = 10.0  # hard wall-clock cap per adapter call
+    max_concurrent_adapters: int = 8       # semaphore width for adapter fan-out per location
     _redis: object | None = field(default=None, repr=False)
-    _rate_limiter: RateLimiter | None = field(default=None, repr=False)  # NEW
+    _rate_limiter: RateLimiter | None = field(default=None, repr=False)
+    _adapter_semaphore: asyncio.Semaphore | None = field(default=None, repr=False)
 
     # Fallback in-memory store (used when Redis is not available)
     _fallback_entries: dict[str, tuple[list[EarthFact], float]] = field(default_factory=dict)
 
     # Stats
     _resolve_count: int = field(default=0)
-    _rate_limited_count: dict[str, int] = field(default_factory=dict)  # NEW
-    _disabled_adapters: set[str] = field(default_factory=set)  # NEW
+    _rate_limited_count: dict[str, int] = field(default_factory=dict)
+    _disabled_adapters: set[str] = field(default_factory=set)
+    _timeout_count: dict[str, int] = field(default_factory=dict)
+    _adapter_latency_sum: dict[str, float] = field(default_factory=dict)
+    _adapter_call_count: dict[str, int] = field(default_factory=dict)
+
+    def _get_adapter_semaphore(self) -> asyncio.Semaphore:
+        """Lazy-init the adapter semaphore (must be created inside a running loop)."""
+        if self._adapter_semaphore is None:
+            self._adapter_semaphore = asyncio.Semaphore(self.max_concurrent_adapters)
+        return self._adapter_semaphore
 
     async def connect_redis(self, redis_url: str) -> None:
         """Connect to Redis. Call during server startup."""
@@ -141,15 +155,27 @@ class EarthProxy:
         if not self.adapters:
             return []
 
-        all_facts: list[EarthFact] = []
         query = location_name
 
-        for adapter in self.adapters:
-            # Use policy enforcement wrapper (handles enabled check, rate limits, fallback)
-            facts = await self._resolve_with_policy(
-                adapter, query, location_name, location_id, max_results_per_adapter
-            )
-            all_facts.extend(facts)
+        # Run all adapters concurrently — the single biggest throughput win.
+        # Each adapter is independent (different HTTP endpoint), so there is
+        # no reason to wait for one before starting the next.
+        results = await asyncio.gather(
+            *(
+                self._resolve_with_policy(
+                    adapter, query, location_name, location_id, max_results_per_adapter
+                )
+                for adapter in self.adapters
+            ),
+            return_exceptions=True,
+        )
+
+        all_facts: list[EarthFact] = []
+        for i, result in enumerate(results):
+            if isinstance(result, BaseException):
+                logger.warning(f"Adapter {self.adapters[i].name} raised: {result}")
+            else:
+                all_facts.extend(result)
 
         await self._set_facts(key, all_facts)
         self._resolve_count += 1
@@ -180,13 +206,22 @@ class EarthProxy:
         if not self.adapters:
             return []
 
+        results = await asyncio.gather(
+            *(
+                self._resolve_with_policy(
+                    adapter, query, location_name, location_id, max_results_per_adapter
+                )
+                for adapter in self.adapters
+            ),
+            return_exceptions=True,
+        )
+
         all_facts: list[EarthFact] = []
-        for adapter in self.adapters:
-            # Use policy enforcement wrapper (handles enabled check, rate limits, fallback)
-            facts = await self._resolve_with_policy(
-                adapter, query, location_name, location_id, max_results_per_adapter
-            )
-            all_facts.extend(facts)
+        for i, result in enumerate(results):
+            if isinstance(result, BaseException):
+                logger.warning(f"Adapter {self.adapters[i].name} raised: {result}")
+            else:
+                all_facts.extend(result)
 
         await self._set_facts(key, all_facts)
         self._resolve_count += 1
@@ -223,17 +258,31 @@ class EarthProxy:
     def get_policy_stats(self) -> dict:
         """Get statistics about policy enforcement.
 
-        Returns metrics on rate limiting, disabled adapters, and policy
-        configuration for monitoring and debugging.
+        Returns metrics on rate limiting, disabled adapters, timeouts,
+        and per-adapter latency for monitoring and debugging.
         """
+        adapter_stats = {}
+        for a in self.adapters:
+            name = a.name
+            calls = self._adapter_call_count.get(name, 0)
+            adapter_stats[name] = {
+                "calls": calls,
+                "avg_latency_ms": round(
+                    (self._adapter_latency_sum.get(name, 0) / calls) * 1000, 1
+                ) if calls else 0,
+                "timeouts": self._timeout_count.get(name, 0),
+                "rate_limited": self._rate_limited_count.get(name, 0),
+            }
         return {
             "total_resolves": self._resolve_count,
             "rate_limited_counts": dict(self._rate_limited_count),
+            "timeout_counts": dict(self._timeout_count),
             "disabled_adapters": list(self._disabled_adapters),
             "enabled_adapter_count": len([
                 a for a in self.adapters
                 if self.policies.get_policy(a.name).enabled
             ]),
+            "adapters": adapter_stats,
         }
 
     # ------------------------------------------------------------------
@@ -251,9 +300,11 @@ class EarthProxy:
         """Resolve from adapter with policy enforcement.
 
         Wraps adapter.resolve() with all policy checks:
-        - Check if adapter is enabled
-        - Enforce rate limits
-        - Handle failures according to fallback policy
+        1. Check if adapter is enabled
+        2. Enforce rate limits
+        3. Acquire adapter concurrency semaphore
+        4. Call adapter.resolve() with a hard wall-clock timeout
+        5. Track latency and timeout stats
 
         This is the single enforcement point for all adapter policies.
         """
@@ -280,20 +331,48 @@ class EarthProxy:
                     adapter, policy, rate_check.retry_after_seconds
                 )
 
-        # 3. Call adapter with existing error handling
+        # 3. Resolve timeout: per-adapter policy overrides proxy default
+        timeout = policy.timeout_seconds or self.default_timeout_seconds
+
+        # 4. Call adapter behind semaphore + hard timeout
+        sem = self._get_adapter_semaphore()
+        t0 = _time.monotonic()
         try:
-            facts = await adapter.resolve(
-                query=query,
-                location_name=location_name,
-                location_id=location_id,
-                max_results=max_results,
-            )
-            logger.debug(
-                f"Earth proxy: {adapter.name} resolved {len(facts)} facts for {query}"
-            )
+            async with sem:
+                facts = await asyncio.wait_for(
+                    adapter.resolve(
+                        query=query,
+                        location_name=location_name,
+                        location_id=location_id,
+                        max_results=max_results,
+                    ),
+                    timeout=timeout,
+                )
+            elapsed = _time.monotonic() - t0
+            self._adapter_latency_sum[adapter.name] = \
+                self._adapter_latency_sum.get(adapter.name, 0) + elapsed
+            self._adapter_call_count[adapter.name] = \
+                self._adapter_call_count.get(adapter.name, 0) + 1
             return facts
 
+        except asyncio.TimeoutError:
+            elapsed = _time.monotonic() - t0
+            self._timeout_count[adapter.name] = \
+                self._timeout_count.get(adapter.name, 0) + 1
+            self._adapter_call_count[adapter.name] = \
+                self._adapter_call_count.get(adapter.name, 0) + 1
+            logger.warning(
+                f"Adapter {adapter.name} timed out after {elapsed:.1f}s "
+                f"(limit={timeout}s, total timeouts={self._timeout_count[adapter.name]})"
+            )
+            return []
+
         except Exception as e:
+            elapsed = _time.monotonic() - t0
+            self._adapter_latency_sum[adapter.name] = \
+                self._adapter_latency_sum.get(adapter.name, 0) + elapsed
+            self._adapter_call_count[adapter.name] = \
+                self._adapter_call_count.get(adapter.name, 0) + 1
             return await self._handle_adapter_failure(adapter, policy, e)
 
     async def _handle_rate_limit(

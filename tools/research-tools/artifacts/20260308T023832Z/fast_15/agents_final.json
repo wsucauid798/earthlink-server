@@ -1,0 +1,812 @@
+[
+  {
+    "id": "A1",
+    "name": "Agent A1",
+    "location_id": 32623,
+    "location_name": "Tottenham Court Road",
+    "last_action": "move",
+    "energy": 52.3,
+    "knowledge_score": 117.93,
+    "visited_locations": 96,
+    "policy": "q_learning",
+    "last_reward": -0.0535,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 32623,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A2",
+    "name": "Agent A2",
+    "location_id": 93298,
+    "location_name": "Gospel Oak",
+    "last_action": "observe",
+    "energy": 55.0,
+    "knowledge_score": 92.23,
+    "visited_locations": 82,
+    "policy": "q_learning",
+    "last_reward": -0.0401,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 93553,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A3",
+    "name": "Agent A3",
+    "location_id": 112105,
+    "location_name": "Greystones",
+    "last_action": "move",
+    "energy": 55.1,
+    "knowledge_score": 78.91,
+    "visited_locations": 65,
+    "policy": "q_learning",
+    "last_reward": 1.0124,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 130054,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A4",
+    "name": "Agent A4",
+    "location_id": 88903,
+    "location_name": "Niddrie",
+    "last_action": "move",
+    "energy": 50.4,
+    "knowledge_score": 84.04,
+    "visited_locations": 69,
+    "policy": "q_learning",
+    "last_reward": 0.9371,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 61404,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A5",
+    "name": "Agent A5",
+    "location_id": 90866,
+    "location_name": "Chapels",
+    "last_action": "move",
+    "energy": 49.5,
+    "knowledge_score": 83.3,
+    "visited_locations": 67,
+    "policy": "q_learning",
+    "last_reward": 0.9481,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 68086,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A6",
+    "name": "Agent A6",
+    "location_id": 97672,
+    "location_name": "Bubnell",
+    "last_action": "rest",
+    "energy": 52.1,
+    "knowledge_score": 70.18,
+    "visited_locations": 59,
+    "policy": "q_learning",
+    "last_reward": -0.0543,
+    "goal": {
+      "kind": "recover",
+      "target_location_id": 97672,
+      "target_agent_id": null,
+      "priority": 1.0
+    }
+  },
+  {
+    "id": "A7",
+    "name": "Agent A7",
+    "location_id": 95892,
+    "location_name": "Common Side",
+    "last_action": "move",
+    "energy": 49.9,
+    "knowledge_score": 71.57,
+    "visited_locations": 62,
+    "policy": "q_learning",
+    "last_reward": 0.9492,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 23623,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A8",
+    "name": "Agent A8",
+    "location_id": 50763,
+    "location_name": "Shotts",
+    "last_action": "move",
+    "energy": 53.2,
+    "knowledge_score": 71.91,
+    "visited_locations": 61,
+    "policy": "q_learning",
+    "last_reward": 0.9675,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 33096,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A9",
+    "name": "Agent A9",
+    "location_id": 99878,
+    "location_name": "Frandley",
+    "last_action": "move",
+    "energy": 56.9,
+    "knowledge_score": 67.63,
+    "visited_locations": 59,
+    "policy": "q_learning",
+    "last_reward": 0.9833,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 92320,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A10",
+    "name": "Agent A10",
+    "location_id": 93735,
+    "location_name": "Greenvale",
+    "last_action": "move",
+    "energy": 55.7,
+    "knowledge_score": 58.03,
+    "visited_locations": 48,
+    "policy": "q_learning",
+    "last_reward": 0.9396,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 93735,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A11",
+    "name": "Agent A11",
+    "location_id": 99016,
+    "location_name": "Shelf",
+    "last_action": "move",
+    "energy": 62.9,
+    "knowledge_score": 57.26,
+    "visited_locations": 49,
+    "policy": "q_learning",
+    "last_reward": 0.9885,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 16425,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A12",
+    "name": "Agent A12",
+    "location_id": 2638,
+    "location_name": "Thurcaston",
+    "last_action": "move",
+    "energy": 55.4,
+    "knowledge_score": 51.71,
+    "visited_locations": 43,
+    "policy": "q_learning",
+    "last_reward": 1.0037,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 2638,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A13",
+    "name": "Agent A13",
+    "location_id": 103508,
+    "location_name": "Lower Hirst",
+    "last_action": "move",
+    "energy": 49.7,
+    "knowledge_score": 54.06,
+    "visited_locations": 46,
+    "policy": "q_learning",
+    "last_reward": 0.9116,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 94471,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A14",
+    "name": "Agent A14",
+    "location_id": 9082,
+    "location_name": "Millisle",
+    "last_action": "move",
+    "energy": 60.2,
+    "knowledge_score": 40.2,
+    "visited_locations": 33,
+    "policy": "q_learning",
+    "last_reward": 0.9855,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 22787,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A15",
+    "name": "Agent A15",
+    "location_id": 95195,
+    "location_name": "Balsall Street",
+    "last_action": "move",
+    "energy": 51.7,
+    "knowledge_score": 51.5,
+    "visited_locations": 41,
+    "policy": "q_learning",
+    "last_reward": 0.957,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 97235,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A16",
+    "name": "Agent A16",
+    "location_id": 92773,
+    "location_name": "Orrell Park",
+    "last_action": "move",
+    "energy": 53.6,
+    "knowledge_score": 49.52,
+    "visited_locations": 41,
+    "policy": "q_learning",
+    "last_reward": 0.9891,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 92773,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A17",
+    "name": "Agent A17",
+    "location_id": 90191,
+    "location_name": "Peasehill",
+    "last_action": "observe",
+    "energy": 64.2,
+    "knowledge_score": 49.12,
+    "visited_locations": 41,
+    "policy": "q_learning",
+    "last_reward": 0.0061,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 18262,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A18",
+    "name": "Agent A18",
+    "location_id": 4529,
+    "location_name": "Silvertown",
+    "last_action": "observe",
+    "energy": 66.1,
+    "knowledge_score": 43.97,
+    "visited_locations": 38,
+    "policy": "q_learning",
+    "last_reward": 0.0155,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 63547,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A19",
+    "name": "Agent A19",
+    "location_id": 67919,
+    "location_name": "Holloway",
+    "last_action": "move",
+    "energy": 72.0,
+    "knowledge_score": 42.87,
+    "visited_locations": 38,
+    "policy": "q_learning",
+    "last_reward": 1.0856,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 69334,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A20",
+    "name": "Agent A20",
+    "location_id": 93707,
+    "location_name": "North Ella",
+    "last_action": "move",
+    "energy": 62.2,
+    "knowledge_score": 42.57,
+    "visited_locations": 34,
+    "policy": "q_learning",
+    "last_reward": 1.0035,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 10759,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A21",
+    "name": "Agent A21",
+    "location_id": 15510,
+    "location_name": "Freckleton",
+    "last_action": "move",
+    "energy": 52.5,
+    "knowledge_score": 51.43,
+    "visited_locations": 43,
+    "policy": "q_learning",
+    "last_reward": 0.9283,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 104743,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A22",
+    "name": "Agent A22",
+    "location_id": 90570,
+    "location_name": "Brackla",
+    "last_action": "move",
+    "energy": 63.9,
+    "knowledge_score": 45.86,
+    "visited_locations": 37,
+    "policy": "q_learning",
+    "last_reward": 0.9955,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 61239,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A23",
+    "name": "Agent A23",
+    "location_id": 12292,
+    "location_name": "Kenton",
+    "last_action": "move",
+    "energy": 65.8,
+    "knowledge_score": 39.24,
+    "visited_locations": 34,
+    "policy": "q_learning",
+    "last_reward": 1.0398,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 90782,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A24",
+    "name": "Agent A24",
+    "location_id": 87883,
+    "location_name": "Cupid's Corner",
+    "last_action": "move",
+    "energy": 73.7,
+    "knowledge_score": 37.13,
+    "visited_locations": 30,
+    "policy": "q_learning",
+    "last_reward": 1.0497,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 65529,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A25",
+    "name": "Agent A25",
+    "location_id": 97736,
+    "location_name": "North End",
+    "last_action": "move",
+    "energy": 62.2,
+    "knowledge_score": 40.55,
+    "visited_locations": 35,
+    "policy": "q_learning",
+    "last_reward": 1.0342,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 22065,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A26",
+    "name": "Agent A26",
+    "location_id": 92630,
+    "location_name": "New Lenton",
+    "last_action": "move",
+    "energy": 68.8,
+    "knowledge_score": 36.96,
+    "visited_locations": 32,
+    "policy": "q_learning",
+    "last_reward": 1.031,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 3789,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A27",
+    "name": "Agent A27",
+    "location_id": 101571,
+    "location_name": "Filmore Hill",
+    "last_action": "observe",
+    "energy": 73.8,
+    "knowledge_score": 34.15,
+    "visited_locations": 27,
+    "policy": "q_learning",
+    "last_reward": 0.0538,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 1638,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A28",
+    "name": "Agent A28",
+    "location_id": 93287,
+    "location_name": "Wren's Nest",
+    "last_action": "move",
+    "energy": 71.5,
+    "knowledge_score": 37.22,
+    "visited_locations": 31,
+    "policy": "q_learning",
+    "last_reward": 1.0542,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 92422,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A29",
+    "name": "Agent A29",
+    "location_id": 91801,
+    "location_name": "King's Tamerton",
+    "last_action": "observe",
+    "energy": 72.2,
+    "knowledge_score": 32.73,
+    "visited_locations": 27,
+    "policy": "q_learning",
+    "last_reward": 0.0461,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 91447,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A30",
+    "name": "Agent A30",
+    "location_id": 13873,
+    "location_name": "Hartington",
+    "last_action": "move",
+    "energy": 71.6,
+    "knowledge_score": 35.87,
+    "visited_locations": 31,
+    "policy": "q_learning",
+    "last_reward": 1.0527,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 95431,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A31",
+    "name": "Agent A31",
+    "location_id": 34205,
+    "location_name": "Lower Sundon",
+    "last_action": "move",
+    "energy": 65.9,
+    "knowledge_score": 32.6,
+    "visited_locations": 28,
+    "policy": "q_learning",
+    "last_reward": 1.0686,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 89872,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A32",
+    "name": "Agent A32",
+    "location_id": 666,
+    "location_name": "Wimbledon",
+    "last_action": "move",
+    "energy": 71.7,
+    "knowledge_score": 36.07,
+    "visited_locations": 29,
+    "policy": "q_learning",
+    "last_reward": 1.0208,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 50993,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A33",
+    "name": "Agent A33",
+    "location_id": 19702,
+    "location_name": "Chapel Brampton",
+    "last_action": "move",
+    "energy": 64.0,
+    "knowledge_score": 28.69,
+    "visited_locations": 25,
+    "policy": "q_learning",
+    "last_reward": 1.0198,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 11503,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A34",
+    "name": "Agent A34",
+    "location_id": 97380,
+    "location_name": "Wrightington",
+    "last_action": "move",
+    "energy": 53.2,
+    "knowledge_score": 32.1,
+    "visited_locations": 28,
+    "policy": "q_learning",
+    "last_reward": 0.9288,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 93583,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A35",
+    "name": "Agent A35",
+    "location_id": 514,
+    "location_name": "Woburn",
+    "last_action": "move",
+    "energy": 70.1,
+    "knowledge_score": 27.87,
+    "visited_locations": 23,
+    "policy": "q_learning",
+    "last_reward": 1.0377,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 66016,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A36",
+    "name": "Agent A36",
+    "location_id": 101772,
+    "location_name": "Stonehills",
+    "last_action": "move",
+    "energy": 71.8,
+    "knowledge_score": 29.79,
+    "visited_locations": 24,
+    "policy": "q_learning",
+    "last_reward": 1.0399,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 90672,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A37",
+    "name": "Agent A37",
+    "location_id": 67459,
+    "location_name": "Upper Lambourn",
+    "last_action": "move",
+    "energy": 61.6,
+    "knowledge_score": 25.98,
+    "visited_locations": 23,
+    "policy": "q_learning",
+    "last_reward": 0.989,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 18543,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A38",
+    "name": "Agent A38",
+    "location_id": 98250,
+    "location_name": "Cape Hill",
+    "last_action": "move",
+    "energy": 72.6,
+    "knowledge_score": 29.37,
+    "visited_locations": 23,
+    "policy": "q_learning",
+    "last_reward": 1.0887,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 7643,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A39",
+    "name": "Agent A39",
+    "location_id": 25182,
+    "location_name": "Kinmundy",
+    "last_action": "move",
+    "energy": 71.6,
+    "knowledge_score": 29.44,
+    "visited_locations": 24,
+    "policy": "q_learning",
+    "last_reward": 1.08,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 92357,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A40",
+    "name": "Agent A40",
+    "location_id": 113235,
+    "location_name": "Crosshaven",
+    "last_action": "move",
+    "energy": 70.1,
+    "knowledge_score": 30.69,
+    "visited_locations": 24,
+    "policy": "q_learning",
+    "last_reward": 1.045,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 115822,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A41",
+    "name": "Agent A41",
+    "location_id": 63556,
+    "location_name": "Plumstead",
+    "last_action": "move",
+    "energy": 76.2,
+    "knowledge_score": 29.94,
+    "visited_locations": 24,
+    "policy": "q_learning",
+    "last_reward": 1.0767,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 89086,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A42",
+    "name": "Agent A42",
+    "location_id": 65785,
+    "location_name": "Longshaw",
+    "last_action": "move",
+    "energy": 66.5,
+    "knowledge_score": 23.81,
+    "visited_locations": 21,
+    "policy": "q_learning",
+    "last_reward": -0.0468,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 91512,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A43",
+    "name": "Agent A43",
+    "location_id": 14164,
+    "location_name": "Hackbridge",
+    "last_action": "move",
+    "energy": 74.6,
+    "knowledge_score": 28.81,
+    "visited_locations": 23,
+    "policy": "q_learning",
+    "last_reward": 1.0486,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 32393,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A44",
+    "name": "Agent A44",
+    "location_id": 769,
+    "location_name": "Wickham Market",
+    "last_action": "move",
+    "energy": 74.5,
+    "knowledge_score": 26.82,
+    "visited_locations": 22,
+    "policy": "q_learning",
+    "last_reward": 1.0941,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 64277,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  },
+  {
+    "id": "A45",
+    "name": "Agent A45",
+    "location_id": 32920,
+    "location_name": "Whiston",
+    "last_action": "move",
+    "energy": 71.5,
+    "knowledge_score": 30.28,
+    "visited_locations": 24,
+    "policy": "q_learning",
+    "last_reward": 1.0684,
+    "goal": {
+      "kind": "investigate_gap",
+      "target_location_id": 66042,
+      "target_agent_id": null,
+      "priority": 0.9
+    }
+  }
+]

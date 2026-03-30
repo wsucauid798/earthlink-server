@@ -284,6 +284,7 @@ def test_agent_learns_from_perceived_earth_facts():
     observation = AgentObservation(
         current_location=location,
         current_weather=None,
+        current_wind=None,
         neighbour_ids=[],
         simulation_time=datetime.now(timezone.utc),
         earth_facts=earth_facts,
@@ -309,6 +310,7 @@ def test_earth_facts_have_correct_predicates():
     observation = AgentObservation(
         current_location=location,
         current_weather=None,
+        current_wind=None,
         neighbour_ids=[],
         simulation_time=datetime.now(timezone.utc),
         earth_facts=_make_canned_facts(),
@@ -334,6 +336,7 @@ def test_agent_skips_empty_earth_facts():
     observation = AgentObservation(
         current_location=location,
         current_weather=None,
+        current_wind=None,
         neighbour_ids=[],
         simulation_time=datetime.now(timezone.utc),
         earth_facts=facts,
@@ -355,6 +358,7 @@ def test_earth_facts_not_re_ingested_on_repeated_observation():
     observation = AgentObservation(
         current_location=location,
         current_weather=None,
+        current_wind=None,
         neighbour_ids=[],
         simulation_time=datetime.now(timezone.utc),
         earth_facts=earth_facts,
@@ -385,6 +389,7 @@ async def test_full_pipeline_proxy_to_perception():
     observation = AgentObservation(
         current_location=location,
         current_weather=None,
+        current_wind=None,
         neighbour_ids=[],
         simulation_time=datetime.now(timezone.utc),
         earth_facts=await proxy.get_resolved_facts(1),

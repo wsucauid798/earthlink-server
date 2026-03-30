@@ -1,40 +1,48 @@
 # EarthLink Server
 
-A symbolic virtual world server, built from real Earth data.
+The Symbolic Virtual World engine. Hosts world state, agent execution, Earth-proxy evidence access, and the API surface.
 
-EarthLink simulates a living world where autonomous agents explore, learn, and interact with a geographically accurate representation of real places, real connections, real weather.
+The server manages a world defined as W = (S, A, T, R, O) -- symbolic state, action set, event-driven transitions, reward topology, and observation interface. Currently instantiated with Earth-derived structure: real places, real weather, real celestial mechanics, and civilisation data proxied live from 21+ open-source adapters.
+
+## Stack
+
+- **Python** with FastAPI + Uvicorn
+- **PostgreSQL** -- persistent world state (geography, weather, astronomy, agent positions)
+- **Redis** -- ephemeral Earth-proxy cache (TTL-based, LRU eviction)
+- **ChromaDB** -- agent semantic memory (vector similarity retrieval)
+- **Ray** -- distributed agent actors (parallel tick execution)
+- **Docker Compose** -- containerised deployment
 
 ## Prerequisites
 
-- Python 3.12+
-- PostgreSQL (with the EarthLink database populated)
-- Redis (for shared state)
-- ChromaDB (for vector memory)
+- Docker and Docker Compose
 
-## Setup
+Or for local development:
+- Python 3.12+
+- PostgreSQL, Redis, ChromaDB running separately
+
+## Running (Docker)
 
 ```bash
-# Create a virtual environment
-python -m venv .venv
-.venv\Scripts\activate   # Windows
-source .venv/bin/activate # macOS / Linux
-
-# Install dependencies
-pip install -e ".[dev]"
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your database credentials
+docker compose up --build -d
 ```
 
-## Running
+Services: server (port 8000), PostgreSQL (5432), Redis (6379), ChromaDB (8001).
+
+## Running (Local)
 
 ```bash
-# Start the server
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+source .venv/bin/activate     # macOS / Linux
+
+pip install -e ".[dev]"
+cp .env.example .env          # Edit with your credentials
+
 uvicorn main:app --app-dir src --reload
 ```
 
-The API is served at `http://localhost:8000` by default. Interactive docs at `/docs`.
+API at `http://localhost:8000`. Interactive docs at `/docs`.
 
 ## Testing
 
@@ -42,6 +50,10 @@ The API is served at `http://localhost:8000` by default. Interactive docs at `/d
 pytest
 ```
 
+## Research Tools
+
+Evaluation suite for research data collection lives in `tools/research/`. See `tools/research/README.md`.
+
 ## License
 
-All rights reserved.
+[MIT](LICENSE)

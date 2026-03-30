@@ -50,6 +50,7 @@ class _AgentActorImpl:
         tick_count: int | None,
         earth_facts_map: dict,
         wind=None,
+        tick_interval: float = 1.0,
     ) -> dict:
         """Run one full agent tick: perceive → decide → act → learn.
 
@@ -78,7 +79,7 @@ class _AgentActorImpl:
             observation, geography, weather, self._rng,
         )
         previous_location = agent.location_id
-        agent.apply_action(next_location, geography)
+        agent.apply_action(next_location, geography, tick_interval_seconds=tick_interval)
 
         # Post-move perception
         post_earth_facts = earth_facts_map.get(agent.location_id, [])

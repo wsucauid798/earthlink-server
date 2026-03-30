@@ -3,12 +3,17 @@
 The world IS Earth. Time is real Earth time — always. There is no
 simulated clock, no alternative era, no fast-forward. Every tick,
 the world reads the real wall clock and that is the time.
+
+Time is per-location. Every place on Earth has its own local time,
+timezone, and season based on its coordinates.
 """
 
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+from timezonefinder import TimezoneFinder
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,51 +73,22 @@ class TimeSystem:
     """
     The world's clock. Always real Earth time.
 
-    Internally stores UTC. Exposes local time in the configured
-    timezone (default Europe/London — handles GMT/BST automatically).
+    Internally stores UTC. Per-location local time, timezone, and
+    season are resolved from coordinates using real timezone boundaries.
     """
     current_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     tick_count: int = 0
-    timezone_name: str = "Europe/London"
-    _tz: ZoneInfo | None = field(default=None, repr=False)
+    _tf: TimezoneFinder | None = field(default=None, repr=False)
+
+    # Timezone cache: (lat, lng) rounded -> IANA timezone name
+    _tz_cache: dict[tuple[float, float], str] = field(default_factory=dict)
 
     # Astronomy data: location_id -> date -> AstronomyState
     _astronomy: dict[int, dict[str, AstronomyState]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self._tz = ZoneInfo(self.timezone_name)
-        # Always start at real time
+        self._tf = TimezoneFinder()
         self.sync()
-
-    @property
-    def tz(self) -> ZoneInfo:
-        """The active timezone object."""
-        if self._tz is None:
-            self._tz = ZoneInfo(self.timezone_name)
-        return self._tz
-
-    @property
-    def local_time(self) -> datetime:
-        """Current time expressed in the configured timezone (e.g. Europe/London)."""
-        return self.current_time.astimezone(self.tz)
-
-    @property
-    def utc_offset(self) -> str:
-        """Current UTC offset string (e.g. '+00:00' for GMT, '+01:00' for BST)."""
-        offset = self.local_time.utcoffset()
-        if offset is None:
-            return "+00:00"
-        total_seconds = int(offset.total_seconds())
-        sign = "+" if total_seconds >= 0 else "-"
-        total_seconds = abs(total_seconds)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes = remainder // 60
-        return f"{sign}{hours:02d}:{minutes:02d}"
-
-    @property
-    def timezone_abbr(self) -> str:
-        """Current timezone abbreviation (e.g. 'GMT' or 'BST')."""
-        return self.local_time.strftime("%Z")
 
     @property
     def date(self):
@@ -126,17 +102,80 @@ class TimeSystem:
     def minute(self):
         return self.current_time.minute
 
-    @property
-    def season(self) -> str:
-        """Current season from Earth's orbital position (Northern Hemisphere).
+    def timezone_at(self, lat: float, lng: float) -> str:
+        """Resolve IANA timezone name from coordinates. Cached."""
+        key = (round(lat, 2), round(lng, 2))
+        if key not in self._tz_cache:
+            tz_name = self._tf.timezone_at(lat=lat, lng=lng) if self._tf else None
+            self._tz_cache[key] = tz_name or "UTC"
+        return self._tz_cache[key]
 
-        Derived from the Sun's ecliptic longitude — the same orbital
-        mechanics that drive the real seasons on Earth.
-        """
+    def local_time_at(self, lat: float, lng: float) -> datetime:
+        """Current local time at a specific location on Earth."""
+        tz_name = self.timezone_at(lat, lng)
+        tz = ZoneInfo(tz_name)
+        return self.current_time.astimezone(tz)
+
+    def time_at(self, lat: float, lng: float) -> dict:
+        """Full time info for a location: local time, timezone, offset, abbreviation."""
+        tz_name = self.timezone_at(lat, lng)
+        tz = ZoneInfo(tz_name)
+        local = self.current_time.astimezone(tz)
+        offset = local.utcoffset()
+        if offset is None:
+            offset_str = "+00:00"
+        else:
+            total_seconds = int(offset.total_seconds())
+            sign = "+" if total_seconds >= 0 else "-"
+            total_seconds = abs(total_seconds)
+            hours, remainder = divmod(total_seconds, 3600)
+            minutes = remainder // 60
+            offset_str = f"{sign}{hours:02d}:{minutes:02d}"
+
+        return {
+            "local_time": local.isoformat(),
+            "timezone": tz_name,
+            "timezone_abbr": local.strftime("%Z"),
+            "utc_offset": offset_str,
+            "hour": local.hour,
+            "minute": local.minute,
+            "date": local.date().isoformat(),
+        }
+
+    def season_at(self, lat: float) -> str:
+        """Current season at a latitude. Hemisphere and tropical aware."""
         jd = julian_day_from_datetime(self.current_time.replace(tzinfo=None))
         lon = solar_ecliptic_longitude(jd)
-        name, _, _, _ = season_from_ecliptic_longitude(lon)
+        name, _, _, _ = season_from_ecliptic_longitude(lon, latitude=lat)
         return name.lower()
+
+    # --- Backward-compatible properties (default to London for global display) ---
+
+    @property
+    def local_time(self) -> datetime:
+        """Current time in Europe/London. For global display / backward compat."""
+        return self.current_time.astimezone(ZoneInfo("Europe/London"))
+
+    @property
+    def utc_offset(self) -> str:
+        offset = self.local_time.utcoffset()
+        if offset is None:
+            return "+00:00"
+        total_seconds = int(offset.total_seconds())
+        sign = "+" if total_seconds >= 0 else "-"
+        total_seconds = abs(total_seconds)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes = remainder // 60
+        return f"{sign}{hours:02d}:{minutes:02d}"
+
+    @property
+    def timezone_abbr(self) -> str:
+        return self.local_time.strftime("%Z")
+
+    @property
+    def season(self) -> str:
+        """Current season at default latitude (London). For backward compat."""
+        return self.season_at(51.5)
 
     def sync(self) -> None:
         """Sync the world clock to real Earth time (UTC)."""
@@ -281,7 +320,7 @@ class TimeSystem:
         return refreshed
 
     def to_dict(self) -> dict:
-        """Serialize current time state."""
+        """Serialize current time state (global / UTC-centric)."""
         return {
             "current_time": self.current_time.isoformat(),
             "local_time": self.local_time.isoformat(),
@@ -290,7 +329,7 @@ class TimeSystem:
             "hour": self.hour,
             "minute": self.minute,
             "season": self.season,
-            "timezone": self.timezone_name,
-            "timezone_abbr": self.timezone_abbr,
-            "utc_offset": self.utc_offset,
+            "timezone": "UTC",
+            "timezone_abbr": "UTC",
+            "utc_offset": "+00:00",
         }

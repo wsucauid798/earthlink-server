@@ -253,7 +253,10 @@ class AutonomousAgent:
     discount_factor: float = 0.92
     energy: float = 100.0
     last_move_distance_km: float = 0.0
+    last_move_connection_type: str = "road"
     last_action: str = "spawned"
+    # Locomotion
+    speed_kmh: float = 5.0  # base walking speed (km/h), affects energy cost
     last_reward: float = 0.0
     current_goal: AgentGoal | None = None
     goal_age_ticks: int = 0
@@ -310,15 +313,6 @@ class AutonomousAgent:
         state_id = observation.current_location.id
         self._last_state_id = state_id
 
-        if self.current_goal and self.current_goal.kind == "recover" and self.energy < 80:
-            self._last_action_id = self.location_id
-            return self.location_id
-
-        # Proactive rest: agents occasionally stop to observe when energy is below full
-        if self.energy < 75 and rng.random() < 0.15:
-            self._last_action_id = self.location_id
-            return self.location_id
-
         # epsilon-greedy policy on learned Q-values, conditioned by current autonomous goal.
         if rng.random() < self.exploration_bias:
             selected = rng.choice(observation.neighbour_ids)
@@ -347,24 +341,47 @@ class AutonomousAgent:
         self._last_action_id = selected
         return selected
 
-    def apply_action(self, new_location_id: int, geography: Geography) -> None:
+    def _terrain_energy_modifier(self, connection_type: str) -> float:
+        """Terrain affects energy cost. Roads cheapest, waterways most expensive."""
+        modifiers = {
+            "road": 1.0,
+            "rail": 1.2,
+            "path": 1.5,
+            "waterway": 2.5,
+            "proximity": 2.0,
+        }
+        return modifiers.get(connection_type, 1.5)
+
+    def _movement_energy_cost(self, distance_km: float, connection_type: str) -> float:
+        """Energy cost for moving a given distance over a given terrain.
+
+        Proportional to distance and terrain difficulty. An agent that
+        moves further or over harder terrain pays more energy.
+        """
+        terrain_mod = self._terrain_energy_modifier(connection_type)
+        return distance_km * terrain_mod
+
+    def apply_action(self, new_location_id: int, geography: Geography, tick_interval_seconds: float = 1.0) -> None:
         if new_location_id == self.location_id:
-            if self.current_goal and self.current_goal.kind == "recover":
-                self.last_action = "rest"
-            else:
-                self.last_action = "observe"
+            # Staying at current location — still exploring it (deeper observation)
+            self.last_action = "explore"
             self.last_move_distance_km = 0.0
+            self.last_move_connection_type = "road"
             return
 
-        previous = self.location_id
+        # Move to new location — pay energy proportional to distance and terrain
         distance_km = 0.0
-        for location, connection in geography.get_nearby_locations(previous):
+        connection_type = "proximity"
+        for location, connection in geography.get_nearby_locations(self.location_id):
             if location.id == new_location_id:
                 distance_km = connection.distance_km
+                connection_type = connection.connection_type
                 break
+
         self.location_id = new_location_id
         self.last_move_distance_km = distance_km
-        self.last_action = "move"
+        self.last_move_connection_type = connection_type
+        self.last_action = "explore"
 
     def learn(self, next_observation: AgentObservation, tick_count: int | None = None) -> None:
         self._ingest_observation(next_observation, tick_count=tick_count)
@@ -396,11 +413,13 @@ class AutonomousAgent:
             key = next_observation.current_weather.conditions.lower()
             self.knowledge.condition_counts[key] = self.knowledge.condition_counts.get(key, 0) + 1
 
-        if self.last_action in ("rest", "observe"):
-            self.energy = min(100.0, self.energy + 3.0)
-        else:
-            distance_penalty = max(1.0, self.last_move_distance_km * 0.05)
-            self.energy = max(0.0, self.energy - distance_penalty)
+        # Energy: movement costs proportional to distance, offset by steady recovery.
+        # Net effect: short moves cost a little, long moves cost more,
+        # but recovery keeps agents sustainably exploring.
+        if self.last_move_distance_km > 0:
+            cost = self._movement_energy_cost(self.last_move_distance_km, self.last_move_connection_type) * 0.5
+            self.energy = max(0.0, self.energy - cost)
+        self.energy = min(100.0, self.energy + 0.8)
 
     def to_summary(self, geography: Geography) -> dict:
         loc = geography.get_location(self.location_id)
@@ -1084,6 +1103,7 @@ class AutonomousAgent:
             "location_id": self.location_id,
             "energy": self.energy,
             "last_move_distance_km": self.last_move_distance_km,
+            "last_move_connection_type": self.last_move_connection_type,
             "last_action": self.last_action,
             "learning_rate": self.learning_rate,
             "exploration_bias": self.exploration_bias,
@@ -1112,6 +1132,7 @@ class AutonomousAgent:
             discount_factor=float(payload.get("discount_factor", 0.92)),
             energy=float(payload.get("energy", 100.0)),
             last_move_distance_km=float(payload.get("last_move_distance_km", 0.0)),
+            last_move_connection_type=str(payload.get("last_move_connection_type", "road")),
             last_action=str(payload.get("last_action", "spawned")),
             current_goal=AgentGoal.from_dict(payload.get("goal")),
             goal_age_ticks=int(payload.get("goal_age_ticks", 0)),
@@ -1538,15 +1559,15 @@ class AgentSystem:
 
         return cls(agents=agents, _rng=rng)
 
-    async def tick(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None) -> list[dict]:
+    async def tick(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None, tick_interval: float = 1.0) -> list[dict]:
         """Tick all agents. Dispatches to Ray (parallel) or sequential path."""
         if self._use_ray:
-            return await self._tick_ray(geography, weather, sim_time, tick_count, earth_proxy, wind)
-        return await self._tick_sequential(geography, weather, sim_time, tick_count, earth_proxy, wind)
+            return await self._tick_ray(geography, weather, sim_time, tick_count, earth_proxy, wind, tick_interval)
+        return await self._tick_sequential(geography, weather, sim_time, tick_count, earth_proxy, wind, tick_interval)
 
     # --- Sequential tick (original logic) ---------------------------------
 
-    async def _tick_sequential(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None) -> list[dict]:
+    async def _tick_sequential(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None, tick_interval: float = 1.0) -> list[dict]:
         events: list[dict] = []
         for agent in self.agents:
             earth_facts = []
@@ -1567,7 +1588,7 @@ class AgentSystem:
             agent.refresh_goal(observation, geography, self._rng)
             next_location = agent.choose_next_location(observation, geography, weather, self._rng)
             previous_location = agent.location_id
-            agent.apply_action(next_location, geography)
+            agent.apply_action(next_location, geography, tick_interval_seconds=tick_interval)
 
             next_earth_facts = []
             if earth_proxy and await earth_proxy.is_location_resolved(agent.location_id):
@@ -1583,13 +1604,24 @@ class AgentSystem:
             events.append(
                 {
                     "agent_id": agent.agent_id,
+                    # Perceive: what the agent observed
+                    "location_id": agent.location_id,
                     "from_location_id": previous_location,
                     "to_location_id": agent.location_id,
-                    "action": agent.last_action,
+                    # Learn: what knowledge changed
                     "knowledge_score": agent.knowledge.knowledge_score,
-                    "reward": agent.last_reward,
-                    "q_value": round(q_value, 6),
+                    "facts_learned": len(next_earth_facts) if next_earth_facts else 0,
+                    "visited_count": agent.knowledge.discovered_location_count,
+                    # Decide: what goal drove the decision
                     "goal": agent.current_goal.to_dict() if agent.current_goal else None,
+                    "q_value": round(q_value, 6),
+                    "reward": agent.last_reward,
+                    # Move: where and how far
+                    "moved": previous_location != agent.location_id,
+                    "distance_km": round(agent.last_move_distance_km, 2),
+                    # Communicate: handled in social_learn, logged separately
+                    # Energy
+                    "energy": round(agent.energy, 1),
                 }
             )
 
@@ -1598,7 +1630,7 @@ class AgentSystem:
 
     # --- Ray parallel tick ------------------------------------------------
 
-    async def _tick_ray(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None) -> list[dict]:
+    async def _tick_ray(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None, tick_interval: float = 1.0) -> list[dict]:
         """Fan out tick to all Ray actors in parallel, then coordinate social learning."""
         import asyncio
         import ray as _ray
@@ -1621,7 +1653,7 @@ class AgentSystem:
 
         # 3. Fan out tick to all actors — true parallelism
         futures = [
-            actor.tick.remote(geo_ref, weather_ref, sim_time, tick_count, facts_ref, wind_ref)
+            actor.tick.remote(geo_ref, weather_ref, sim_time, tick_count, facts_ref, wind_ref, tick_interval)
             for actor in self._actors
         ]
 

@@ -9,6 +9,7 @@ __version__ = "0.0.2"
 
 import asyncio
 import logging
+import time as _time
 from datetime import datetime, timezone
 
 from db.engine import async_session
@@ -58,6 +59,7 @@ class World:
         self._refresh_counts: dict[str, int] = {}
         self._tick_callbacks: list = []
         self._refreshed_domains: set[str] = set()  # domains refreshed since last tick
+        self._resolve_task: asyncio.Task | None = None  # background location resolution
 
     @property
     def is_running(self) -> bool:
@@ -76,7 +78,7 @@ class World:
             self.geography = await load_geography(session)
 
             # Initialize time system — always real Earth time
-            self.time = TimeSystem(timezone_name=self.config.timezone)
+            self.time = TimeSystem()
 
             # Restore tick count from database if it exists
             result = await session.execute(select(WorldState).where(WorldState.id == 1))
@@ -142,6 +144,7 @@ class World:
                     "location_id": row.location_id,
                     "energy": row.energy,
                     "last_move_distance_km": row.last_move_distance_km,
+                    "last_move_connection_type": row.last_move_connection_type or "road",
                     "last_action": row.last_action,
                     "learning_rate": row.learning_rate,
                     "exploration_bias": row.exploration_bias,
@@ -202,7 +205,11 @@ class World:
             logger.warning(f"Ray init failed, using sequential mode: {e}")
 
         # Initialise Earth proxy — the world's live connection to civilisation
-        self.earth_proxy = EarthProxy(policies=self.config.adapters)  # Pass adapter policies from config
+        self.earth_proxy = EarthProxy(
+            policies=self.config.adapters,
+            default_timeout_seconds=self.config.adapter_timeout_seconds,
+            max_concurrent_adapters=self.config.max_concurrent_adapters,
+        )
         try:
             from config import settings
             await self.earth_proxy.connect_redis(settings.redis_url)
@@ -225,43 +232,67 @@ class World:
         """
         Advance the world by one step.
         Time moves — the world lives.
-        Weather is kept current by the background refresh scheduler.
-        Returns a summary of what changed.
+
+        Phases are timed for observability (R6). The agent phase is
+        wall-clock capped so a slow agent tick (e.g. Chroma ingestion)
+        never prevents the WS broadcast from firing on schedule (R1/R5).
         """
-        # Advance time
+        tick_wall_start = _time.monotonic()
+
+        # Phase 1: advance time (essentially free)
         self.time.advance()
 
-        # LOD: resolve civilisation content for any agent locations the
-        # world hasn't loaded yet. This is the world's job — the smart
-        # layer that maintains a complete Earth for its agents.
+        # Phase 2: schedule background LOD resolve (fire-and-forget)
         if self.earth_proxy and self.agents:
-            await self._resolve_agent_locations()
+            if self._resolve_task is None or self._resolve_task.done():
+                self._resolve_task = asyncio.create_task(
+                    self._resolve_agent_locations()
+                )
 
-        # Agents perceive -> decide -> act -> learn
+        # Phase 3: agent tick — capped at remaining wall budget
         agent_events = []
+        agent_phase_exceeded = False
         if self.agents:
-            agent_events = await self.agents.tick(
-                self.geography,
-                self.weather,
-                self.time.current_time,
-                tick_count=self.time.tick_count,
-                earth_proxy=self.earth_proxy,
-                wind=self.wind,
-            )
+            budget = max(0.1, self.config.max_tick_wall_seconds - (_time.monotonic() - tick_wall_start))
+            try:
+                agent_events = await asyncio.wait_for(
+                    self.agents.tick(
+                        self.geography,
+                        self.weather,
+                        self.time.current_time,
+                        tick_count=self.time.tick_count,
+                        earth_proxy=self.earth_proxy,
+                        wind=self.wind,
+                        tick_interval=self.config.tick_interval_seconds,
+                    ),
+                    timeout=budget,
+                )
+            except asyncio.TimeoutError:
+                agent_phase_exceeded = True
+                logger.warning(
+                    f"Tick {self.time.tick_count}: agent phase exceeded budget "
+                    f"({budget:.2f}s), skipped to keep WS on schedule"
+                )
 
         # Build tick summary — include which domains were refreshed since last tick
         refreshed = self._refreshed_domains.copy()
         self._refreshed_domains.clear()
 
+        # Earth rotation state for frontend globe rendering
+        from world.celestial import earth_rotation_state
+        rotation = earth_rotation_state(self.time.current_time.replace(tzinfo=None))
+
         tick_data = {
             "tick": self.time.tick_count,
             "time": self.time.to_dict(),
+            "rotation": rotation,
             "weather_updated": "weather" in refreshed,
             "wind_updated": "wind" in refreshed,
             "atmosphere_updated": "atmosphere" in refreshed,
             "astronomy_updated": "astronomy" in refreshed,
             "data_feeds_updated": "data_feeds" in refreshed,
             "agent_events": agent_events,
+            "agent_phase_exceeded": agent_phase_exceeded,
             "earth_proxy_resolves": self.earth_proxy.total_resolves if self.earth_proxy else 0,
         }
 
@@ -269,7 +300,7 @@ class World:
         if self.time.tick_count % 10 == 0:
             await self._save_state()
 
-        # Notify listeners
+        # Phase 4: notify listeners (WS broadcast) — always runs
         for callback in self._tick_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):
@@ -278,6 +309,17 @@ class World:
                     callback(tick_data)
             except Exception as e:
                 logger.error(f"Tick callback error: {e}")
+
+        # R6: structured timing log (every 50 ticks to avoid noise)
+        tick_wall_ms = (_time.monotonic() - tick_wall_start) * 1000
+        if self.time.tick_count % 50 == 0:
+            resolving = "yes" if (self._resolve_task and not self._resolve_task.done()) else "no"
+            logger.info(
+                f"Tick {self.time.tick_count}: wall={tick_wall_ms:.0f}ms "
+                f"agents={len(agent_events)} events "
+                f"lod_resolving={resolving} "
+                f"proxy_resolves={self.earth_proxy.total_resolves if self.earth_proxy else 0}"
+            )
 
         return tick_data
 
@@ -301,6 +343,14 @@ class World:
             except asyncio.CancelledError:
                 pass
             self._tick_task = None
+        # Cancel background resolve task
+        if self._resolve_task and not self._resolve_task.done():
+            self._resolve_task.cancel()
+            try:
+                await self._resolve_task
+            except asyncio.CancelledError:
+                pass
+            self._resolve_task = None
         # Cancel all refresh schedulers
         for domain, task in self._refresh_tasks.items():
             task.cancel()
@@ -418,19 +468,38 @@ class World:
         progressively resolves civilisation for places agents have reached.
         Once resolved, content lives in Redis with TTL. When it expires,
         the world asks Earth again. The internet is always the source of truth.
-        """
-        unresolved: set[int] = set()
-        for agent in self.agents.agents:
-            if not await self.earth_proxy.is_location_resolved(agent.location_id):
-                unresolved.add(agent.location_id)
 
-        for loc_id in unresolved:
+        Runs as a background task — never blocks the tick loop. Locations
+        are resolved concurrently up to max_concurrent_locations.
+        """
+        # Gather unique agent locations
+        agent_location_ids = {agent.location_id for agent in self.agents.agents}
+
+        # Check which ones need resolution (concurrently)
+        check_results = await asyncio.gather(
+            *(self.earth_proxy.is_location_resolved(loc_id) for loc_id in agent_location_ids)
+        )
+        unresolved = [
+            loc_id for loc_id, resolved in zip(agent_location_ids, check_results)
+            if not resolved
+        ]
+        if not unresolved:
+            return
+
+        # Location-level concurrency limit
+        loc_sem = asyncio.Semaphore(self.config.max_concurrent_locations)
+
+        async def _safe_resolve(loc_id: int) -> None:
             loc = self.geography.get_location(loc_id)
             if loc:
                 try:
-                    await self.earth_proxy.resolve_for_location(loc_id, loc.name)
+                    async with loc_sem:
+                        await self.earth_proxy.resolve_for_location(loc_id, loc.name)
                 except Exception as e:
                     logger.warning(f"LOD resolve failed for {loc.name}: {e}")
+
+        logger.info(f"LOD: resolving {len(unresolved)} locations (max concurrent={self.config.max_concurrent_locations})")
+        await asyncio.gather(*(_safe_resolve(loc_id) for loc_id in unresolved))
 
     async def _refresh_weather(self) -> None:
         """Refresh weather: fetch live current conditions from Open-Meteo."""
@@ -608,6 +677,7 @@ class World:
                     row.location_id = agent_payload["location_id"]
                     row.energy = agent_payload["energy"]
                     row.last_move_distance_km = agent_payload["last_move_distance_km"]
+                    row.last_move_connection_type = agent_payload.get("last_move_connection_type", "road")
                     row.last_action = agent_payload["last_action"]
                     row.learning_rate = agent_payload["learning_rate"]
                     row.exploration_bias = agent_payload["exploration_bias"]

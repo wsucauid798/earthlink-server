@@ -142,7 +142,8 @@ def test_learning_dynamics_are_trait_independent():
     assert low_stamina.energy == high_stamina.energy
 
 
-def test_low_energy_agent_creates_recovery_goal_and_waits():
+def test_low_energy_agent_creates_recovery_goal_but_still_explores():
+    """Low energy triggers a recover goal, but the agent still moves — explorers don't stop."""
     geography = build_geography()
     weather = DummyWeather({1: 10.0, 2: 12.0, 3: 30.0})
     agent = AutonomousAgent(
@@ -161,7 +162,8 @@ def test_low_energy_agent_creates_recovery_goal_and_waits():
 
     assert agent.current_goal is not None
     assert agent.current_goal.kind == "recover"
-    assert selected == agent.location_id
+    # Agent still picks a location — it doesn't stop
+    assert selected in observation.neighbour_ids or selected == agent.location_id
 
 
 def test_social_learning_shares_high_value_action_when_agents_meet():

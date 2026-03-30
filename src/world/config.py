@@ -54,8 +54,8 @@ class AdapterPolicy(BaseModel):
     # Cache control
     cache_ttl_seconds: int | None = None  # None = use EarthProxy default (600s)
 
-    # Timeout (reserved for future use)
-    timeout_seconds: float | None = None  # Future: override adapter's default timeout
+    # Timeout — hard wall-clock cap on a single adapter.resolve() call
+    timeout_seconds: float = 10.0  # Per-adapter override; 0 = use proxy default
 
     # Fallback behavior
     fallback: FallbackBehavior = FallbackBehavior.LOG_WARNING
@@ -145,6 +145,10 @@ class WorldConfig(BaseModel):
     tick_interval_seconds: float = 1.0  # Real seconds between ticks
     timezone: str = "Europe/London"  # IANA timezone — handles GMT/BST automatically
 
+    # Tick wall-clock budget — tick() will time-cap the agent phase so the
+    # total tick never exceeds this. WS broadcast happens regardless.
+    max_tick_wall_seconds: float = 2.0
+
     # Region
     region: str = "GB"  # ISO country code for the region this world covers
 
@@ -153,6 +157,11 @@ class WorldConfig(BaseModel):
 
     # Adapter policies — control over Earth adapter behavior (rate limits, caching, fallback)
     adapters: AdapterPolicies = AdapterPolicies()
+
+    # Earth proxy concurrency — two independent limits
+    adapter_timeout_seconds: float = 10.0   # Default hard timeout per adapter.resolve()
+    max_concurrent_adapters: int = 8        # Adapters queried in parallel per location
+    max_concurrent_locations: int = 4       # Locations resolved in parallel
 
     # Wind system
     wind_station_count: int = 100  # Number of wind monitoring stations
