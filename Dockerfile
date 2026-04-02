@@ -23,15 +23,13 @@ deps = data.get('project', {}).get('dependencies', []); \
 pathlib.Path('requirements.txt').write_text('\n'.join(deps) + '\n')"
 
 # This layer only rebuilds when the actual dependency list changes
-RUN --mount=type=cache,id=pip-cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+RUN pip install -r requirements.txt
 
 # Install the project itself (no deps — they're already installed above)
 RUN mkdir -p src/world src/db src/api src/data_acquisition src/agents src/adapters && \
     touch src/world/__init__.py src/db/__init__.py src/api/__init__.py \
           src/data_acquisition/__init__.py src/agents/__init__.py src/adapters/__init__.py
-RUN --mount=type=cache,id=pip-cache,target=/root/.cache/pip \
-    pip install --no-deps .
+RUN pip install --no-deps .
 
 # Copy only what the app needs at runtime — nothing else enters the image.
 # .dockerignore uses a whitelist (starts with *) so this is safe with COPY . .
