@@ -194,6 +194,8 @@ class AgentSummarySchema(BaseModel):
     name: str
     location_id: int
     location_name: str | None = None
+    lat: float | None = None
+    lng: float | None = None
     last_action: str
     energy: float
     knowledge_score: float

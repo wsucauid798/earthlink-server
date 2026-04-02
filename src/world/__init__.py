@@ -73,10 +73,10 @@ class World:
         """Load the world from the database."""
         logger.info("Loading world...")
 
-        async with async_session() as session:
-            # Load geography
-            self.geography = await load_geography(session)
+        # Load geography (locations in memory, connections on demand)
+        self.geography = await load_geography(async_session)
 
+        async with async_session() as session:
             # Initialize time system — always real Earth time
             self.time = TimeSystem()
 
@@ -90,19 +90,11 @@ class World:
                 f"{self.time.timezone_abbr}, tick={self.time.tick_count}"
             )
 
-            # Get location IDs that have weather/astronomy data
-            weather_location_ids = [
-                loc_id for loc_id in self.geography.locations
-                if self.geography.locations[loc_id].type in ("capital", "city", "town")
-                and self.geography.locations[loc_id].population
-                and self.geography.locations[loc_id].population > 0
-            ]
-            # Limit to top 50 by population (matching data acquisition)
-            weather_location_ids = sorted(
-                weather_location_ids,
-                key=lambda lid: self.geography.locations[lid].population or 0,
-                reverse=True,
-            )[:50]
+            # Get top populated locations for weather/astronomy tracking
+            weather_locations = await self.geography.get_top_locations_by_population(
+                types=["capital", "city", "town"], limit=50
+            )
+            weather_location_ids = [loc.id for loc in weather_locations]
 
             # Load weather
             self.weather = Weather()
@@ -112,7 +104,7 @@ class World:
             await self.time.load_astronomy(session, weather_location_ids)
 
             # Select wind stations — broader geographic coverage than weather
-            wind_station_ids = self._select_wind_stations(
+            wind_station_ids = await self._select_wind_stations(
                 self.geography, self.config.wind_station_count
             )
 
@@ -163,7 +155,7 @@ class World:
             # Top up if configured count is higher than persisted count
             existing_count = len(self.agents.agents)
             if existing_count < self.config.agent_count:
-                topup = AgentSystem.bootstrap(
+                topup = await AgentSystem.bootstrap(
                     geography=self.geography,
                     count=self.config.agent_count,
                     learning_rate=self.config.agent_learning_rate,
@@ -180,7 +172,7 @@ class World:
                     logger.info(f"Topped up {added} new agents (total: {len(self.agents.agents)})")
         else:
             # Bootstrap autonomous agents from scratch
-            self.agents = AgentSystem.bootstrap(
+            self.agents = await AgentSystem.bootstrap(
                 geography=self.geography,
                 count=self.config.agent_count,
                 learning_rate=self.config.agent_learning_rate,
@@ -248,6 +240,11 @@ class World:
                 self._resolve_task = asyncio.create_task(
                     self._resolve_agent_locations()
                 )
+
+        # Phase 2.5: warm location + connection caches for agent positions (LOD)
+        if self.agents and self.geography:
+            agent_locs = {a.location_id for a in self.agents.agents}
+            await self.geography.warm(agent_locs)
 
         # Phase 3: agent tick — capped at remaining wall budget
         agent_events = []
@@ -545,102 +542,21 @@ class World:
         await self.data_feeds.refresh()
 
     async def _refresh_geography(self) -> None:
-        """Refresh geography: reload locations and connections from the database."""
-        async with async_session() as session:
-            self.geography = await load_geography(session)
+        """Refresh geography: reload locations from the database, reset connection cache."""
+        self.geography = await load_geography(async_session)
         logger.info(
             f"Geography refreshed: {self.geography.location_count} locations, "
             f"{self.geography.connection_count} connections"
         )
 
     @staticmethod
-    def _select_wind_stations(geography: Geography, count: int) -> list[int]:
-        """Select wind station locations with broad geographic coverage.
-
-        Strategy:
-        1. Start with top locations by population (overlap with weather stations).
-        2. Fill geographic gaps using a grid over the UK/Ireland bounding box.
-        3. Prefer terrain diversity (highland, water, woodland) in gap-filling.
-        """
-        if not geography.locations:
-            return []
-
-        # Candidates: populated places with coordinates
-        candidates = [
-            loc for loc in geography.locations.values()
-            if loc.type in ("capital", "city", "town", "village", "settlement")
-            and loc.population and loc.population > 0
-        ]
-        if not candidates:
-            # Fallback: any location with population
-            candidates = [
-                loc for loc in geography.locations.values()
-                if loc.population and loc.population > 0
-            ]
-
-        # Phase 1: top locations by population (matches weather station selection)
-        by_pop = sorted(candidates, key=lambda l: l.population or 0, reverse=True)
-        selected_ids: list[int] = [loc.id for loc in by_pop[:min(50, count)]]
-        selected_set = set(selected_ids)
-
-        if len(selected_ids) >= count:
-            return selected_ids[:count]
-
-        # Phase 2: geographic grid fill
-        # UK/Ireland bounding box: ~49.5N to 60.5N, ~11W to 2E
-        LAT_MIN, LAT_MAX = 49.5, 60.5
-        LNG_MIN, LNG_MAX = -11.0, 2.0
-        GRID_ROWS, GRID_COLS = 10, 10
-        lat_step = (LAT_MAX - LAT_MIN) / GRID_ROWS
-        lng_step = (LNG_MAX - LNG_MIN) / GRID_COLS
-
-        # Preferred terrain types for gap-filling (interesting wind behaviour)
-        preferred_terrain = {"highland", "water", "woodland"}
-
-        remaining = [c for c in candidates if c.id not in selected_set]
-
-        for row in range(GRID_ROWS):
-            if len(selected_ids) >= count:
-                break
-            for col in range(GRID_COLS):
-                if len(selected_ids) >= count:
-                    break
-
-                cell_lat_min = LAT_MIN + row * lat_step
-                cell_lat_max = cell_lat_min + lat_step
-                cell_lng_min = LNG_MIN + col * lng_step
-                cell_lng_max = cell_lng_min + lng_step
-
-                # Check if any selected station already covers this cell
-                has_station = any(
-                    cell_lat_min <= geography.locations[sid].lat < cell_lat_max
-                    and cell_lng_min <= geography.locations[sid].lng < cell_lng_max
-                    for sid in selected_ids
-                    if sid in geography.locations
-                )
-                if has_station:
-                    continue
-
-                # Find candidates in this cell
-                in_cell = [
-                    loc for loc in remaining
-                    if cell_lat_min <= loc.lat < cell_lat_max
-                    and cell_lng_min <= loc.lng < cell_lng_max
-                    and loc.id not in selected_set
-                ]
-                if not in_cell:
-                    continue
-
-                # Prefer interesting terrain, then highest population
-                preferred = [l for l in in_cell if l.terrain in preferred_terrain]
-                pick = max(
-                    preferred if preferred else in_cell,
-                    key=lambda l: l.population or 0,
-                )
-                selected_ids.append(pick.id)
-                selected_set.add(pick.id)
-
-        return selected_ids[:count]
+    async def _select_wind_stations(geography: Geography, count: int) -> list[int]:
+        """Select wind station locations — top populated places from DB."""
+        locations = await geography.get_top_locations_by_population(
+            types=["capital", "city", "town", "village", "settlement"],
+            limit=count,
+        )
+        return [loc.id for loc in locations]
 
     async def _save_state(self) -> None:
         """Persist the current world state to the database."""
@@ -712,27 +628,12 @@ class World:
                         "is_daylight": self.time.is_daytime(loc_id),
                     }
 
-        # Earth geography statistics
+        # Earth geography statistics — aggregated from DB
         location_types: dict[str, int] = {}
         regions: dict[str, int] = {}
         countries: dict[str, int] = {}
         total_population = 0
         elevations: list[float] = []
-        if self.geography:
-            for loc in self.geography.locations.values():
-                # Only count types with proper human-readable names (skip single-letter GeoNames codes)
-                if loc.type and len(loc.type) > 1:
-                    location_types[loc.type] = location_types.get(loc.type, 0) + 1
-                # Skip garbage region codes (e.g. "00")
-                if loc.admin_level_2 and not loc.admin_level_2.isdigit():
-                    regions[loc.admin_level_2] = regions.get(loc.admin_level_2, 0) + 1
-                if loc.admin_level_1:
-                    countries[loc.admin_level_1] = countries.get(loc.admin_level_1, 0) + 1
-                if loc.population and loc.population > 0:
-                    total_population += loc.population
-                # Filter GeoNames sentinel (-9999) and unreasonable values
-                if loc.elevation is not None and -500 < loc.elevation < 9000:
-                    elevations.append(loc.elevation)
 
         return {
             "time": self.time.to_dict() if self.time else None,

@@ -1,16 +1,18 @@
-"""Geography — the spatial structure of the world, loaded from real data."""
+"""Geography — the spatial structure of the world, loaded on demand from real data."""
 
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from db.models import Location as LocationModel
 from db.models import LocationConnection as ConnectionModel
 
 logger = logging.getLogger(__name__)
+
+MAX_CONNECTION_DISTANCE_KM = 10.0
 
 
 @dataclass
@@ -23,8 +25,8 @@ class LocationData:
     lng: float
     elevation: float | None
     terrain: str | None
-    admin_level_1: str | None  # United Kingdom
-    admin_level_2: str | None  # England / Scotland / Wales / Northern Ireland
+    admin_level_1: str | None  # Country
+    admin_level_2: str | None  # Nation / Region
     admin_level_3: str | None  # County / Region
     admin_level_4: str | None  # District
     population: int | None
@@ -42,112 +44,310 @@ class ConnectionData:
     direction: str | None
 
 
-@dataclass
+def _location_from_model(m: LocationModel) -> LocationData:
+    return LocationData(
+        id=m.id, name=m.name, type=m.type,
+        lat=m.lat, lng=m.lng, elevation=m.elevation,
+        terrain=m.terrain,
+        admin_level_1=m.admin_level_1, admin_level_2=m.admin_level_2,
+        admin_level_3=m.admin_level_3, admin_level_4=m.admin_level_4,
+        population=m.population, metadata=m.metadata_,
+    )
+
+
+class _LRUCache:
+    """Simple LRU cache backed by OrderedDict."""
+
+    def __init__(self, max_size: int):
+        self._data: OrderedDict = OrderedDict()
+        self._max_size = max_size
+
+    def get(self, key):
+        if key in self._data:
+            self._data.move_to_end(key)
+            return self._data[key]
+        return None
+
+    def put(self, key, value):
+        self._data[key] = value
+        self._data.move_to_end(key)
+        while len(self._data) > self._max_size:
+            self._data.popitem(last=False)
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __len__(self):
+        return len(self._data)
+
+    def clear(self):
+        self._data.clear()
+
+
 class Geography:
     """
-    The full spatial structure of the world.
-    Loaded from the database — these are real places and real connections.
+    The spatial structure of the world — on demand.
+
+    Nothing is loaded into memory at startup. Locations and connections
+    are fetched from the database when needed and cached with LRU eviction.
+    Same LOD pattern as Earth-proxy resolution: the world resolves detail
+    as agents approach, not by cramming everything in at once.
     """
-    locations: dict[int, LocationData] = field(default_factory=dict)
-    connections: list[ConnectionData] = field(default_factory=list)
-    _adjacency: dict[int, list[ConnectionData]] = field(default_factory=dict)
+
+    def __init__(self, session_factory: async_sessionmaker):
+        self._session_factory = session_factory
+        self._loc_cache = _LRUCache(max_size=20_000)
+        self._conn_cache = _LRUCache(max_size=10_000)
+        self._location_count: int | None = None
+        self._connection_count: int | None = None
 
     @property
     def location_count(self) -> int:
-        return len(self.locations)
+        return self._location_count or 0
 
     @property
     def connection_count(self) -> int:
-        return len(self.connections)
+        return self._connection_count or 0
+
+    # --- Sync reads (cache only, used by agent tick) ---
 
     def get_location(self, location_id: int) -> LocationData | None:
-        return self.locations.get(location_id)
-
-    def get_location_by_name(self, name: str) -> LocationData | None:
-        """Find a location by name (case-insensitive, returns first match)."""
-        name_lower = name.lower()
-        for loc in self.locations.values():
-            if loc.name.lower() == name_lower:
-                return loc
-        return None
+        return self._loc_cache.get(location_id)
 
     def get_neighbours(self, location_id: int) -> list[ConnectionData]:
-        """Get all connections from a location."""
-        return self._adjacency.get(location_id, [])
+        result = self._conn_cache.get(location_id)
+        return result if result is not None else []
 
     def get_nearby_locations(self, location_id: int) -> list[tuple[LocationData, ConnectionData]]:
-        """Get neighbouring locations with their connection info."""
         result = []
         for conn in self.get_neighbours(location_id):
             other_id = conn.to_id if conn.from_id == location_id else conn.from_id
-            other_loc = self.locations.get(other_id)
+            other_loc = self.get_location(other_id)
             if other_loc:
                 result.append((other_loc, conn))
         return sorted(result, key=lambda x: x[1].distance_km)
 
-    def get_locations_by_type(self, loc_type: str) -> list[LocationData]:
-        """Get all locations of a given type."""
-        return [loc for loc in self.locations.values() if loc.type == loc_type]
+    # --- Async reads (query DB on cache miss) ---
 
-    def get_locations_in_region(self, admin_level_2: str) -> list[LocationData]:
-        """Get all locations within a nation (England, Scotland, etc.)."""
-        return [loc for loc in self.locations.values() if loc.admin_level_2 == admin_level_2]
+    async def get_location_async(self, location_id: int) -> LocationData | None:
+        cached = self._loc_cache.get(location_id)
+        if cached is not None:
+            return cached
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(LocationModel).where(LocationModel.id == location_id)
+            )
+            model = result.scalar_one_or_none()
+            if model is None:
+                return None
+            loc = _location_from_model(model)
+            self._loc_cache.put(location_id, loc)
+            return loc
+
+    async def get_neighbours_async(self, location_id: int) -> list[ConnectionData]:
+        cached = self._conn_cache.get(location_id)
+        if cached is not None:
+            return cached
+        await self.warm_connections({location_id})
+        return self._conn_cache.get(location_id) or []
+
+    async def get_nearby_locations_async(self, location_id: int) -> list[tuple[LocationData, ConnectionData]]:
+        result = []
+        for conn in await self.get_neighbours_async(location_id):
+            other_id = conn.to_id if conn.from_id == location_id else conn.from_id
+            other_loc = await self.get_location_async(other_id)
+            if other_loc:
+                result.append((other_loc, conn))
+        return sorted(result, key=lambda x: x[1].distance_km)
+
+    async def get_location_by_name_async(self, name: str) -> LocationData | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(LocationModel).where(func.lower(LocationModel.name) == name.lower()).limit(1)
+            )
+            model = result.scalar_one_or_none()
+            if model is None:
+                return None
+            loc = _location_from_model(model)
+            self._loc_cache.put(loc.id, loc)
+            return loc
+
+    # --- Bulk DB queries (for API, agent bootstrap, wind stations) ---
+
+    async def query_locations(
+        self,
+        type: str | None = None,
+        region: str | None = None,
+        search: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[LocationData]:
+        """Query locations from DB with filters. For API endpoints."""
+        async with self._session_factory() as session:
+            q = select(LocationModel)
+            if type:
+                q = q.where(LocationModel.type == type)
+            if region:
+                q = q.where(func.lower(LocationModel.admin_level_2) == region.lower())
+            if search:
+                q = q.where(LocationModel.name.ilike(f"%{search}%"))
+            q = q.order_by(LocationModel.population.desc().nullslast()).offset(offset).limit(limit)
+            result = await session.execute(q)
+            locations = []
+            for model in result.scalars().all():
+                loc = _location_from_model(model)
+                self._loc_cache.put(loc.id, loc)
+                locations.append(loc)
+            return locations
+
+    async def query_locations_geojson(self) -> list[dict]:
+        """Populated locations as GeoJSON features for map rendering.
+
+        Returns capitals, cities, and towns with population >= 500.
+        Keeps the frontend payload manageable (~55K features for Western Europe).
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(
+                    LocationModel.id, LocationModel.name, LocationModel.type,
+                    LocationModel.lat, LocationModel.lng,
+                    LocationModel.population, LocationModel.admin_level_2,
+                ).where(
+                    (LocationModel.type.in_(("capital", "city")))
+                    | ((LocationModel.type == "town") & (LocationModel.population >= 500))
+                )
+            )
+            return [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [row.lng, row.lat]},
+                    "properties": {
+                        "id": row.id, "name": row.name, "type": row.type,
+                        "population": row.population or 0,
+                        "admin_level_2": row.admin_level_2 or "",
+                    },
+                }
+                for row in result.all()
+            ]
+
+    async def get_top_locations_by_population(self, types: list[str], limit: int = 50) -> list[LocationData]:
+        """Get top populated locations of given types. For weather/wind station selection."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(LocationModel)
+                .where(LocationModel.type.in_(types))
+                .where(LocationModel.population > 0)
+                .order_by(LocationModel.population.desc())
+                .limit(limit)
+            )
+            locations = []
+            for model in result.scalars().all():
+                loc = _location_from_model(model)
+                self._loc_cache.put(loc.id, loc)
+                locations.append(loc)
+            return locations
+
+    async def get_random_location_ids(self, count: int = 10) -> list[int]:
+        """Get random location IDs from populated places. For agent broad exploration."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                text(f"""
+                    SELECT id FROM locations
+                    WHERE type IN ('capital', 'city', 'town', 'village')
+                    ORDER BY random() LIMIT {count}
+                """)
+            )
+            return [row[0] for row in result.all()]
+
+    async def get_spawn_locations(self, types: list[str], limit: int = 200) -> list[LocationData]:
+        """Get candidate spawn locations for agents, sorted by population."""
+        return await self.get_top_locations_by_population(types, limit)
+
+    # --- Cache warming (LOD pattern — called before agent tick) ---
+
+    async def warm(self, location_ids: set[int]) -> None:
+        """Batch-fetch locations and connections for a set of IDs."""
+        await self._warm_locations(location_ids)
+        await self.warm_connections(location_ids)
+
+    async def _warm_locations(self, location_ids: set[int]) -> None:
+        missing = [lid for lid in location_ids if lid not in self._loc_cache]
+        if not missing:
+            return
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(LocationModel).where(LocationModel.id.in_(missing))
+            )
+            for model in result.scalars().all():
+                loc = _location_from_model(model)
+                self._loc_cache.put(loc.id, loc)
+
+    async def warm_connections(self, location_ids: set[int]) -> None:
+        """Batch-fetch connections for multiple locations in one query."""
+        missing = [lid for lid in location_ids if lid not in self._conn_cache]
+        if not missing:
+            return
+
+        # Pre-populate with empty lists
+        for lid in missing:
+            self._conn_cache.put(lid, [])
+
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ConnectionModel).where(
+                    (ConnectionModel.from_id.in_(missing) | ConnectionModel.to_id.in_(missing))
+                    & (ConnectionModel.distance_km <= MAX_CONNECTION_DISTANCE_KM)
+                )
+            )
+            # Collect neighbour IDs to warm their locations too
+            neighbour_ids = set()
+            for row in result.scalars().all():
+                conn = ConnectionData(
+                    from_id=row.from_id, to_id=row.to_id,
+                    distance_km=row.distance_km,
+                    connection_type=row.connection_type,
+                    route_name=row.route_name, direction=row.direction,
+                )
+                if row.from_id in self._conn_cache:
+                    self._conn_cache.get(row.from_id).append(conn)
+                if row.to_id in self._conn_cache:
+                    self._conn_cache.get(row.to_id).append(conn)
+                neighbour_ids.add(row.from_id)
+                neighbour_ids.add(row.to_id)
+
+        # Also warm the location data for neighbours so get_nearby_locations works
+        await self._warm_locations(neighbour_ids)
+
+    # --- Counts ---
+
+    async def load_counts(self) -> None:
+        async with self._session_factory() as session:
+            loc_result = await session.execute(text("SELECT COUNT(*) FROM locations"))
+            self._location_count = loc_result.scalar_one()
+            conn_result = await session.execute(
+                text(f"SELECT COUNT(*) FROM location_connections WHERE distance_km <= {MAX_CONNECTION_DISTANCE_KM}")
+            )
+            self._connection_count = conn_result.scalar_one()
+
+    def clear_caches(self) -> None:
+        self._loc_cache.clear()
+        self._conn_cache.clear()
+
+    # --- Compat properties for code that checks geography.locations ---
+
+    @property
+    def locations(self) -> dict:
+        """Access the location cache dict directly. For backwards compat only."""
+        return self._loc_cache._data
 
 
-async def load_geography(session: AsyncSession) -> Geography:
-    """Load the full geography from the database."""
-    geo = Geography()
-
-    # Load all locations
-    result = await session.execute(select(LocationModel))
-    for loc_model in result.scalars().all():
-        geo.locations[loc_model.id] = LocationData(
-            id=loc_model.id,
-            name=loc_model.name,
-            type=loc_model.type,
-            lat=loc_model.lat,
-            lng=loc_model.lng,
-            elevation=loc_model.elevation,
-            terrain=loc_model.terrain,
-            admin_level_1=loc_model.admin_level_1,
-            admin_level_2=loc_model.admin_level_2,
-            admin_level_3=loc_model.admin_level_3,
-            admin_level_4=loc_model.admin_level_4,
-            population=loc_model.population,
-            metadata=loc_model.metadata_,
-        )
-
-    # Load connections (filtered by distance to reduce memory usage)
-    # Only load connections under 10km to keep memory reasonable (~2.4M instead of 5M)
-    # This still allows navigation while reducing memory by 52%
-    MAX_CONNECTION_DISTANCE_KM = 10.0
-    result = await session.execute(
-        select(ConnectionModel).where(ConnectionModel.distance_km <= MAX_CONNECTION_DISTANCE_KM)
-    )
-    loaded_count = 0
-    for conn_model in result.scalars().all():
-        conn = ConnectionData(
-            from_id=conn_model.from_id,
-            to_id=conn_model.to_id,
-            distance_km=conn_model.distance_km,
-            connection_type=conn_model.connection_type,
-            route_name=conn_model.route_name,
-            direction=conn_model.direction,
-        )
-        geo.connections.append(conn)
-        loaded_count += 1
-
-        # Build adjacency (bidirectional)
-        if conn.from_id not in geo._adjacency:
-            geo._adjacency[conn.from_id] = []
-        geo._adjacency[conn.from_id].append(conn)
-
-        if conn.to_id not in geo._adjacency:
-            geo._adjacency[conn.to_id] = []
-        geo._adjacency[conn.to_id].append(conn)
-
+async def load_geography(session_factory: async_sessionmaker) -> Geography:
+    """Create geography with on-demand loading. No bulk data loaded at startup."""
+    geo = Geography(session_factory=session_factory)
+    await geo.load_counts()
     logger.info(
-        f"Geography loaded: {geo.location_count} locations, {loaded_count} connections "
-        f"(<= {MAX_CONNECTION_DISTANCE_KM}km filter applied for memory efficiency)"
+        f"Geography loaded: {geo.location_count} locations, "
+        f"{geo.connection_count} connections available "
+        f"(<= {MAX_CONNECTION_DISTANCE_KM}km, on-demand via cache)"
     )
     return geo

@@ -116,24 +116,9 @@ async def ask_agent(agent_id: str, question: str = Query(..., min_length=1, desc
 
 @router.get("/locations/geojson")
 async def get_locations_geojson():
-    """All locations as a GeoJSON FeatureCollection — for map rendering."""
+    """All locations as a GeoJSON FeatureCollection — streamed from DB."""
     world = get_world()
-    features = []
-    for loc in world.geography.locations.values():
-        features.append({
-            "type": "Feature",
-            "geometry": {
-                "type": "Point",
-                "coordinates": [loc.lng, loc.lat],
-            },
-            "properties": {
-                "id": loc.id,
-                "name": loc.name,
-                "type": loc.type,
-                "population": loc.population or 0,
-                "admin_level_2": loc.admin_level_2 or "",
-            },
-        })
+    features = await world.geography.query_locations_geojson()
     return {"type": "FeatureCollection", "features": features}
 
 
@@ -145,38 +130,11 @@ async def list_locations(
     limit: int = Query(100, ge=1, le=5000),
     offset: int = Query(0, ge=0),
 ):
-    """List locations in the world."""
+    """List locations in the world — queried from DB."""
     world = get_world()
-    locations = list(world.geography.locations.values())
-
-    if type:
-        locations = [loc for loc in locations if loc.type == type]
-    if region:
-        locations = [loc for loc in locations if loc.admin_level_2 and loc.admin_level_2.lower() == region.lower()]
-    if search:
-        search_lower = search.lower()
-        # Score: 0 = exact name, 1 = name starts with, 2 = name contains,
-        #        3 = region/country/district match
-        scored = []
-        for loc in locations:
-            name_lower = loc.name.lower()
-            if name_lower == search_lower:
-                scored.append((0, loc))
-            elif name_lower.startswith(search_lower):
-                scored.append((1, loc))
-            elif search_lower in name_lower:
-                scored.append((2, loc))
-            elif (
-                (loc.admin_level_2 and search_lower in loc.admin_level_2.lower())
-                or (loc.admin_level_3 and search_lower in loc.admin_level_3.lower())
-                or (loc.admin_level_4 and search_lower in loc.admin_level_4.lower())
-                or (loc.terrain and search_lower in loc.terrain.lower())
-            ):
-                scored.append((3, loc))
-        scored.sort(key=lambda x: x[0])
-        locations = [loc for _, loc in scored]
-
-    locations = locations[offset : offset + limit]
+    locations = await world.geography.query_locations(
+        type=type, region=region, search=search, limit=limit, offset=offset,
+    )
 
     return [
         LocationSchema(
@@ -214,7 +172,7 @@ async def get_nearby_locations(location_id: int):
     if not loc:
         raise HTTPException(status_code=404, detail="Location not found")
 
-    nearby = world.geography.get_nearby_locations(location_id)
+    nearby = await world.geography.get_nearby_locations_async(location_id)
     return [
         NearbyLocationSchema(
             location=LocationSchema(
@@ -582,7 +540,7 @@ async def eval_snapshot():
         tick=time_dict.get("tick_count", 0),
         wall_time=datetime.now(timezone.utc).isoformat(),
         is_running=world.is_running,
-        location_count=len(world.geography.locations) if world.geography else 0,
+        location_count=world.geography.location_count if world.geography else 0,
         agent_count=len(agents),
         agents=agents,
         earth_proxy=earth_proxy_stats,

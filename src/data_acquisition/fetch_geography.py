@@ -34,10 +34,25 @@ from db.models import Base, Location, LocationConnection
 
 logger = logging.getLogger(__name__)
 
-# GeoNames country URLs (GB = UK, IE = Ireland)
+# GeoNames country URLs
 GEONAMES_URLS = {
     "GB": "https://download.geonames.org/export/dump/GB.zip",
     "IE": "https://download.geonames.org/export/dump/IE.zip",
+    "FR": "https://download.geonames.org/export/dump/FR.zip",
+    "DE": "https://download.geonames.org/export/dump/DE.zip",
+    "NL": "https://download.geonames.org/export/dump/NL.zip",
+    "BE": "https://download.geonames.org/export/dump/BE.zip",
+    "LU": "https://download.geonames.org/export/dump/LU.zip",
+    "ES": "https://download.geonames.org/export/dump/ES.zip",
+    "PT": "https://download.geonames.org/export/dump/PT.zip",
+    "IT": "https://download.geonames.org/export/dump/IT.zip",
+    "CH": "https://download.geonames.org/export/dump/CH.zip",
+    "AT": "https://download.geonames.org/export/dump/AT.zip",
+    "DK": "https://download.geonames.org/export/dump/DK.zip",
+    "NO": "https://download.geonames.org/export/dump/NO.zip",
+    "SE": "https://download.geonames.org/export/dump/SE.zip",
+    "IS": "https://download.geonames.org/export/dump/IS.zip",
+    "FI": "https://download.geonames.org/export/dump/FI.zip",
 }
 ADMIN1_URL = "https://download.geonames.org/export/dump/admin1CodesASCII.txt"
 ADMIN2_URL = "https://download.geonames.org/export/dump/admin2Codes.txt"
@@ -45,7 +60,7 @@ ADMIN2_URL = "https://download.geonames.org/export/dump/admin2Codes.txt"
 DATA_DIR = Path(__file__).parent.parent / "data" / "geography"
 
 # Countries to fetch (can be configured)
-COUNTRIES_TO_FETCH = ["IE"]  # Only Ireland - GB already in database
+COUNTRIES_TO_FETCH = ["GB", "IE", "FR", "DE", "NL", "BE", "LU", "ES", "PT", "IT", "CH", "AT", "DK", "NO", "SE", "IS", "FI"]
 
 # Feature codes that represent meaningful locations for our world
 FEATURE_CLASSES_KEEP = {"A", "H", "L", "P", "R", "S", "T", "V"}
@@ -81,6 +96,16 @@ FEATURE_CODE_TO_TYPE = {
     "RD": "road", "RR": "railway", "TRL": "trail",
 }
 
+# Country code to name mapping
+COUNTRY_NAMES = {
+    "GB": "United Kingdom", "IE": "Ireland", "FR": "France",
+    "DE": "Germany", "NL": "Netherlands", "BE": "Belgium",
+    "LU": "Luxembourg", "ES": "Spain", "PT": "Portugal",
+    "IT": "Italy", "CH": "Switzerland", "AT": "Austria",
+    "DK": "Denmark", "NO": "Norway", "SE": "Sweden", "IS": "Iceland",
+    "FI": "Finland",
+}
+
 # UK admin1 code mapping (GeoNames uses ENG, SCT, WLS, NIR)
 UK_NATIONS = {
     "ENG": "England",
@@ -98,6 +123,16 @@ IE_COUNTIES = {
     "21": "Meath", "22": "Monaghan", "23": "Offaly", "24": "Roscommon",
     "25": "Sligo", "26": "Tipperary", "27": "Waterford", "29": "Westmeath",
     "30": "Wexford", "31": "Wicklow",
+}
+
+# France admin1 code mapping (régions)
+FR_REGIONS = {
+    "75": "Nouvelle-Aquitaine", "76": "Occitanie", "44": "Grand Est",
+    "32": "Hauts-de-France", "28": "Normandie", "53": "Bretagne",
+    "52": "Pays de la Loire", "24": "Centre-Val de Loire",
+    "27": "Bourgogne-Franche-Comté", "84": "Auvergne-Rhône-Alpes",
+    "93": "Provence-Alpes-Côte d'Azur", "94": "Corse",
+    "11": "Île-de-France",
 }
 
 
@@ -191,8 +226,12 @@ def parse_geonames_row(row: list[str], admin_codes: dict[str, str], country_code
         country_name = "Ireland"
         nation = None  # Ireland doesn't have sub-national divisions like UK
         county = IE_COUNTIES.get(admin1, admin_codes.get(f"IE.{admin1}", admin1) if admin1 else None)
+    elif country_code == "FR":
+        country_name = "France"
+        nation = FR_REGIONS.get(admin1, admin_codes.get(f"FR.{admin1}", admin1) if admin1 else None)
+        county = admin_codes.get(f"FR.{admin1}.{admin2}", admin2) if admin2 else None
     else:
-        country_name = country_code
+        country_name = COUNTRY_NAMES.get(country_code, country_code)
         nation = admin_codes.get(f"{country_code}.{admin1}", admin1) if admin1 else None
         county = admin_codes.get(f"{country_code}.{admin1}.{admin2}", admin2) if admin2 else None
 

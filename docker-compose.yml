@@ -52,8 +52,6 @@ services:
       - "8000:8000"
     deploy:
       resources:
-        limits:
-          memory: 8g
         reservations:
           memory: 4g
     environment:
@@ -74,6 +72,7 @@ services:
         condition: service_healthy
     volumes:
       - app-data:/app/data
+      - ./src:/app/src  # Dev: mount source for hot reload without rebuild
 
 volumes:
   pgdata:

@@ -282,8 +282,14 @@ class AutonomousAgent:
         wind, civilisation — as one seamless environment. The agent just sees Earth."""
         current_location = geography.get_location(self.location_id)
         if current_location is None:
-            current_location = next(iter(geography.locations.values()))
-            self.location_id = current_location.id
+            # Agent's location not in cache — create a minimal placeholder
+            current_location = LocationData(
+                id=self.location_id, name="Unknown", type="town",
+                lat=0.0, lng=0.0, elevation=None, terrain=None,
+                admin_level_1=None, admin_level_2=None,
+                admin_level_3=None, admin_level_4=None,
+                population=None, metadata=None,
+            )
 
         wind_state = None
         if wind:
@@ -428,6 +434,8 @@ class AutonomousAgent:
             "name": self.name,
             "location_id": self.location_id,
             "location_name": loc.name if loc else None,
+            "lat": loc.lat if loc else None,
+            "lng": loc.lng if loc else None,
             "last_action": self.last_action,
             "energy": round(self.energy, 1),
             "knowledge_score": self.knowledge.knowledge_score,
@@ -1215,10 +1223,10 @@ class AutonomousAgent:
             self.goal_age_ticks = 0
             return
 
-        # Fall back to broad exploration among known graph nodes.
-        all_nodes = list(geography.locations.keys())
-        if all_nodes:
-            self.current_goal = AgentGoal(kind="explore", target_location_id=rng.choice(all_nodes), priority=0.6)
+        # Fall back to broad exploration — pick a random neighbour's neighbour
+        all_known = list(self.knowledge.visited_locations)
+        if all_known:
+            self.current_goal = AgentGoal(kind="explore", target_location_id=rng.choice(all_known), priority=0.6)
             self.goal_age_ticks = 0
 
     def _goal_bonus(self, action_id: int, observation: AgentObservation, geography: Geography) -> float:
@@ -1292,7 +1300,8 @@ class AutonomousAgent:
         return None
 
     def _select_knowledge_gap_target(self, observation: AgentObservation, geography: Geography, rng: random.Random) -> int | None:
-        candidates = list(geography.locations.keys())
+        # Score locations the agent knows about (visited + current neighbours)
+        candidates = list(self.knowledge.visited_locations | set(observation.neighbour_ids))
         if not candidates:
             return None
 
@@ -1419,7 +1428,7 @@ class AgentSystem:
 
     # Minimum agent count to justify Ray overhead (workers load PyTorch each).
     # Below this threshold, sequential mode is faster and far lighter on memory.
-    RAY_MIN_AGENTS = 50
+    RAY_MIN_AGENTS = 500  # Sequential is fine up to 500; Ray actors add per-process overhead
 
     def init_ray(self, seed: int = 42) -> bool:
         """Create a Ray actor for each agent. Returns True if Ray mode activated.
@@ -1512,7 +1521,7 @@ class AgentSystem:
     # --- Factory ----------------------------------------------------------
 
     @classmethod
-    def bootstrap(
+    async def bootstrap(
         cls,
         geography: Geography,
         count: int,
@@ -1521,17 +1530,11 @@ class AgentSystem:
         seed: int,
     ) -> "AgentSystem":
         rng = random.Random(seed)
-        all_locations = list(geography.locations.values())
-        if not all_locations:
+        spawn_pool = await geography.get_spawn_locations(
+            types=["capital", "city", "town"], limit=max(count, 200)
+        )
+        if not spawn_pool:
             return cls(agents=[], _rng=rng)
-
-        preferred = [
-            loc
-            for loc in all_locations
-            if loc.type in ("capital", "city", "town")
-        ]
-        spawn_pool = preferred if preferred else all_locations
-        spawn_pool.sort(key=lambda loc: loc.population or 0, reverse=True)
 
         agents: list[AutonomousAgent] = []
         for i in range(count):

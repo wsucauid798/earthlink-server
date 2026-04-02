@@ -167,7 +167,7 @@ class WorldConfig(BaseModel):
     wind_station_count: int = 100  # Number of wind monitoring stations
 
     # Autonomous agents
-    agent_count: int = 45
+    agent_count: int = 300
     agent_learning_rate: float = 0.2
     agent_exploration_bias: float = 0.35
     agent_random_seed: int = 42
