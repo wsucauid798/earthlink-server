@@ -246,29 +246,26 @@ class World:
             agent_locs = {a.location_id for a in self.agents.agents}
             await self.geography.warm(agent_locs)
 
-        # Phase 3: agent tick — capped at remaining wall budget
+        # Phase 3: agent tick — let agents complete, warn if slow
         agent_events = []
         agent_phase_exceeded = False
         if self.agents:
-            budget = max(0.1, self.config.max_tick_wall_seconds - (_time.monotonic() - tick_wall_start))
-            try:
-                agent_events = await asyncio.wait_for(
-                    self.agents.tick(
-                        self.geography,
-                        self.weather,
-                        self.time.current_time,
-                        tick_count=self.time.tick_count,
-                        earth_proxy=self.earth_proxy,
-                        wind=self.wind,
-                        tick_interval=self.config.tick_interval_seconds,
-                    ),
-                    timeout=budget,
-                )
-            except asyncio.TimeoutError:
+            agent_start = _time.monotonic()
+            agent_events = await self.agents.tick(
+                self.geography,
+                self.weather,
+                self.time.current_time,
+                tick_count=self.time.tick_count,
+                earth_proxy=self.earth_proxy,
+                wind=self.wind,
+                tick_interval=self.config.tick_interval_seconds,
+            )
+            agent_wall = _time.monotonic() - agent_start
+            if agent_wall > self.config.max_tick_wall_seconds:
                 agent_phase_exceeded = True
                 logger.warning(
-                    f"Tick {self.time.tick_count}: agent phase exceeded budget "
-                    f"({budget:.2f}s), skipped to keep WS on schedule"
+                    f"Tick {self.time.tick_count}: agent phase took {agent_wall:.1f}s "
+                    f"(budget {self.config.max_tick_wall_seconds:.1f}s)"
                 )
 
         # Build tick summary — include which domains were refreshed since last tick

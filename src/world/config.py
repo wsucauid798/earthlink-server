@@ -147,7 +147,8 @@ class WorldConfig(BaseModel):
 
     # Tick wall-clock budget — tick() will time-cap the agent phase so the
     # total tick never exceeds this. WS broadcast happens regardless.
-    max_tick_wall_seconds: float = 2.0
+    # Must be generous enough for all agents to complete against dense geography.
+    max_tick_wall_seconds: float = 30.0
 
     # Region
     region: str = "GB"  # ISO country code for the region this world covers
