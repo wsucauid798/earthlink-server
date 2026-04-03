@@ -611,7 +611,7 @@ class World:
 
             await session.commit()
 
-    def get_state_summary(self) -> dict:
+    async def get_state_summary(self) -> dict:
         """Get a summary of the current world state."""
         weather_summary = {}
         if self.weather:
@@ -667,7 +667,7 @@ class World:
             },
             "agent_count": len(self.agents.agents) if self.agents else 0,
             "agent_backend": "ray" if (self.agents and self.agents.using_ray) else "sequential",
-            "agents": self.agents.summaries(self.geography) if self.agents else [],
+            "agents": (await self.list_agents()) if self.agents else [],
             "earth_proxy": {
                 "adapters": self.earth_proxy.adapter_count if self.earth_proxy else 0,
                 "total_resolves": self.earth_proxy.total_resolves if self.earth_proxy else 0,
@@ -676,9 +676,12 @@ class World:
             },
         }
 
-    def list_agents(self) -> list[dict]:
+    async def list_agents(self) -> list[dict]:
         if not self.agents or not self.geography:
             return []
+        # Warm the location cache so to_summary() can resolve coordinates
+        agent_locs = {a.location_id for a in self.agents.agents}
+        await self.geography.warm(agent_locs)
         return self.agents.summaries(self.geography)
 
     def get_agent(self, agent_id: str) -> dict | None:

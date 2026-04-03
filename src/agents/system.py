@@ -1606,6 +1606,7 @@ class AgentSystem:
             if agent._last_state_id is not None and agent._last_action_id is not None:
                 q_value = agent.knowledge.q_values.get(agent._last_state_id, {}).get(agent._last_action_id, 0.0)
 
+            loc = geography.get_location(agent.location_id)
             events.append(
                 {
                     "agent_id": agent.agent_id,
@@ -1613,6 +1614,9 @@ class AgentSystem:
                     "location_id": agent.location_id,
                     "from_location_id": previous_location,
                     "to_location_id": agent.location_id,
+                    "lat": loc.lat if loc else None,
+                    "lng": loc.lng if loc else None,
+                    "location_name": loc.name if loc else None,
                     # Learn: what knowledge changed
                     "knowledge_score": agent.knowledge.knowledge_score,
                     "facts_learned": len(next_earth_facts) if next_earth_facts else 0,

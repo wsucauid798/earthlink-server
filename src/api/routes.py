@@ -55,7 +55,7 @@ async def get_version():
 async def get_world_state():
     """Get the current state of the world."""
     world = get_world()
-    return world.get_state_summary()
+    return await world.get_state_summary()
 
 
 # --- Agents ---
@@ -68,7 +68,7 @@ async def list_agents(
 ):
     """List autonomous agents with current state and learning progress."""
     world = get_world()
-    agents = world.list_agents()
+    agents = await world.list_agents()
 
     if search:
         search_lower = search.lower()
@@ -530,7 +530,7 @@ async def eval_snapshot():
     from datetime import datetime, timezone
 
     world = get_world()
-    agents = world.list_agents()
+    agents = await world.list_agents()
     time_dict = world.time.to_dict() if world.time else {}
     earth_proxy_stats = None
     if world.earth_proxy:
