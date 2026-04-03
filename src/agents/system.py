@@ -419,13 +419,15 @@ class AutonomousAgent:
             key = next_observation.current_weather.conditions.lower()
             self.knowledge.condition_counts[key] = self.knowledge.condition_counts.get(key, 0) + 1
 
-        # Energy: movement costs proportional to distance, offset by steady recovery.
-        # Net effect: short moves cost a little, long moves cost more,
-        # but recovery keeps agents sustainably exploring.
+        # Energy: light movement cost, strong recovery. Agents should spend
+        # the vast majority of their time exploring, not recovering.
+        # A 20km road move costs 2 energy. Recovery is 5/tick. Agents
+        # stay above the recover threshold under sustained exploration.
         if self.last_move_distance_km > 0:
-            cost = self._movement_energy_cost(self.last_move_distance_km, self.last_move_connection_type) * 0.5
+            cost = self._movement_energy_cost(self.last_move_distance_km, self.last_move_connection_type) * 0.1
+            cost = min(cost, 3.0)  # hard cap: no single move costs more than 3
             self.energy = max(0.0, self.energy - cost)
-        self.energy = min(100.0, self.energy + 0.8)
+        self.energy = min(100.0, self.energy + 5.0)
 
     def to_summary(self, geography: Geography) -> dict:
         loc = geography.get_location(self.location_id)
@@ -1180,12 +1182,12 @@ class AutonomousAgent:
     def refresh_goal(self, observation: AgentObservation, geography: Geography, rng: random.Random) -> None:
         self.goal_age_ticks += 1
 
-        if self.energy < 50:
+        if self.energy < 15:
             self.current_goal = AgentGoal(kind="recover", target_location_id=self.location_id, priority=1.0)
             self.goal_age_ticks = 0
             return
 
-        if self.current_goal and self.current_goal.kind == "recover" and self.energy >= 85:
+        if self.current_goal and self.current_goal.kind == "recover" and self.energy >= 30:
             self.current_goal = None
 
         if self.current_goal and self.current_goal.target_location_id == self.location_id:
