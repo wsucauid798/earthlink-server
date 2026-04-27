@@ -270,17 +270,30 @@ class Geography:
         await self._warm_locations(location_ids)
         await self.warm_connections(location_ids)
 
+    # asyncpg's `bind_execute` is limited to 32767 parameters per statement
+    # (Postgres wire protocol uses int16 for the parameter count). With many
+    # agents (>1000) the neighbour-ID set easily exceeds that, so all bulk
+    # IN queries are chunked.
+    _IN_CHUNK_SIZE = 5000
+
+    @staticmethod
+    def _chunked(items, n):
+        items = list(items)
+        for i in range(0, len(items), n):
+            yield items[i:i + n]
+
     async def _warm_locations(self, location_ids: set[int]) -> None:
         missing = [lid for lid in location_ids if lid not in self._loc_cache]
         if not missing:
             return
         async with self._session_factory() as session:
-            result = await session.execute(
-                select(LocationModel).where(LocationModel.id.in_(missing))
-            )
-            for model in result.scalars().all():
-                loc = _location_from_model(model)
-                self._loc_cache.put(loc.id, loc)
+            for chunk in self._chunked(missing, self._IN_CHUNK_SIZE):
+                result = await session.execute(
+                    select(LocationModel).where(LocationModel.id.in_(chunk))
+                )
+                for model in result.scalars().all():
+                    loc = _location_from_model(model)
+                    self._loc_cache.put(loc.id, loc)
 
     async def warm_connections(self, location_ids: set[int]) -> None:
         """Batch-fetch connections for multiple locations in one query."""
@@ -292,30 +305,35 @@ class Geography:
         for lid in missing:
             self._conn_cache.put(lid, [])
 
-        async with self._session_factory() as session:
-            result = await session.execute(
-                select(ConnectionModel).where(
-                    (ConnectionModel.from_id.in_(missing) | ConnectionModel.to_id.in_(missing))
-                    & (ConnectionModel.distance_km <= MAX_CONNECTION_DISTANCE_KM)
-                )
-            )
-            # Collect neighbour IDs to warm their locations too
-            neighbour_ids = set()
-            for row in result.scalars().all():
-                conn = ConnectionData(
-                    from_id=row.from_id, to_id=row.to_id,
-                    distance_km=row.distance_km,
-                    connection_type=row.connection_type,
-                    route_name=row.route_name, direction=row.direction,
-                )
-                if row.from_id in self._conn_cache:
-                    self._conn_cache.get(row.from_id).append(conn)
-                if row.to_id in self._conn_cache:
-                    self._conn_cache.get(row.to_id).append(conn)
-                neighbour_ids.add(row.from_id)
-                neighbour_ids.add(row.to_id)
+        # The OR of two `IN(...)` clauses doubles the parameter count, so
+        # halve the chunk size to stay safely below 32767.
+        chunk_size = self._IN_CHUNK_SIZE // 2
 
-        # Also warm the location data for neighbours so get_nearby_locations works
+        neighbour_ids: set[int] = set()
+        async with self._session_factory() as session:
+            for chunk in self._chunked(missing, chunk_size):
+                result = await session.execute(
+                    select(ConnectionModel).where(
+                        (ConnectionModel.from_id.in_(chunk) | ConnectionModel.to_id.in_(chunk))
+                        & (ConnectionModel.distance_km <= MAX_CONNECTION_DISTANCE_KM)
+                    )
+                )
+                for row in result.scalars().all():
+                    conn = ConnectionData(
+                        from_id=row.from_id, to_id=row.to_id,
+                        distance_km=row.distance_km,
+                        connection_type=row.connection_type,
+                        route_name=row.route_name, direction=row.direction,
+                    )
+                    if row.from_id in self._conn_cache:
+                        self._conn_cache.get(row.from_id).append(conn)
+                    if row.to_id in self._conn_cache:
+                        self._conn_cache.get(row.to_id).append(conn)
+                    neighbour_ids.add(row.from_id)
+                    neighbour_ids.add(row.to_id)
+
+        # Also warm the location data for neighbours so get_nearby_locations works.
+        # `_warm_locations` is itself chunked.
         await self._warm_locations(neighbour_ids)
 
     # --- Counts ---

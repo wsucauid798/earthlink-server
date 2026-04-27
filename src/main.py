@@ -10,6 +10,8 @@ from api.ws import router as ws_router, on_tick
 from db.engine import dispose_engine, engine, async_session
 from db.models import Base
 from world import World
+from world.config import WorldConfig
+from config import settings
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
@@ -31,17 +33,16 @@ async def lifespan(app: FastAPI):
             logger.warning("Database not ready (%s), retrying in %ds...", exc, attempt * 2)
             await asyncio.sleep(attempt * 2)
 
-    # Auto-seed geography if the database is empty
-    async with async_session() as session:
-        result = await session.execute(text("SELECT COUNT(*) FROM locations"))
-        count = result.scalar()
-    if count == 0:
-        logger.info("Empty database detected — seeding geography data...")
-        from data_acquisition.fetch_geography import run as seed_geography
-        await seed_geography()
-        logger.info("Geography seeding complete")
+    # Auto-seed geography. `seed_geography()` (run) is internally idempotent:
+    # it queries which countries are already present (via metadata->>'country_code'
+    # in fetch_geography.py:444) and only fetches the missing ones. Cheap on a
+    # populated DB, full seed on an empty one, incremental seed when new
+    # countries are added to COUNTRIES_TO_FETCH.
+    from data_acquisition.fetch_geography import run as seed_geography
+    logger.info("Checking geography seed (run() will skip countries already present)")
+    await seed_geography()
 
-    world = World()
+    world = World(WorldConfig(agent_count=settings.agent_count))
     await world.load()
     world.on_tick(on_tick)
     set_world(world)

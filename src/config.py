@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # World — overridable via EARTHLINK_AGENT_COUNT etc.
+    # Sequential mode threshold is RAY_MIN_AGENTS=500 (in agents/system.py);
+    # values <500 keep sequential tick path, >=500 enable Ray actors.
+    agent_count: int = 300
+
     model_config = {"env_prefix": "EARTHLINK_"}
 
 

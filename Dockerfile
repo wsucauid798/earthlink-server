@@ -3,6 +3,15 @@ FROM python:3.13-slim
 LABEL org.opencontainers.image.title="earthlink-server"
 LABEL org.opencontainers.image.version="0.0.2"
 LABEL org.opencontainers.image.description="A symbolic virtual world — built from real Earth data"
+# These tie the GHCR package to its source repo so it shows up under
+# https://github.com/wsucauid798/earthlink-server (Packages sidebar) and
+# inherits the repo's admins/visibility instead of being a loose user-level package.
+LABEL org.opencontainers.image.source="https://github.com/wsucauid798/earthlink-server"
+LABEL org.opencontainers.image.url="https://github.com/wsucauid798/earthlink-server"
+LABEL org.opencontainers.image.documentation="https://github.com/wsucauid798/earthlink-server#readme"
+LABEL org.opencontainers.image.licenses="MIT"
+# revision + created are added dynamically at build time via `--label` flags,
+# see deploy/DEPLOY.md "Updating the server image" for the build command.
 
 WORKDIR /app
 

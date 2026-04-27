@@ -1428,9 +1428,21 @@ class AgentSystem:
 
     # --- Ray lifecycle -----------------------------------------------------
 
-    # Minimum agent count to justify Ray overhead (workers load PyTorch each).
+    # Minimum agent count to justify Ray overhead.
+    # Each Ray actor is a separate Python process that loads PyTorch / sentence-transformers
+    # — ~150–250 MB resident per actor. At 1000 actors that's ~200 GB RAM, so the threshold
+    # is also a guard against accidentally exhausting host memory.
+    # Sequential mode with `asyncio.to_thread` per-agent dispatch (see `_tick_sequential`)
+    # keeps the main event loop free; up to ~1000 agents on a single host is well-behaved.
     # Below this threshold, sequential mode is faster and far lighter on memory.
-    RAY_MIN_AGENTS = 500  # Sequential is fine up to 500; Ray actors add per-process overhead
+    # Effectively keeps Ray off on a single VPS. Each Ray actor is its own
+    # Python process (~150–250 MB resident with PyTorch + sentence-transformers),
+    # so 1000 actors would need ~200 GB RAM — far past any single host.
+    # Sequential + asyncio.to_thread (see `_tick_sequential`) scales fine into
+    # the thousands on one host because all agents share one process and the
+    # blocking work is I/O-bound (Chroma HTTP). Ray is only viable when wired
+    # to a remote worker pool — re-evaluate this threshold then.
+    RAY_MIN_AGENTS = 10000
 
     def init_ray(self, seed: int = 42) -> bool:
         """Create a Ray actor for each agent. Returns True if Ray mode activated.
@@ -1573,34 +1585,39 @@ class AgentSystem:
     # --- Sequential tick (original logic) ---------------------------------
 
     async def _tick_sequential(self, geography: Geography, weather: Weather, sim_time: datetime, tick_count: int | None = None, earth_proxy: EarthProxy | None = None, wind: Wind | None = None, tick_interval: float = 1.0) -> list[dict]:
+        """Sequential agent tick.
+
+        The async outer shell awaits earth_proxy facts (true async HTTP). The
+        per-agent sync body — which calls into ChromaDB's sync HTTP client and
+        does CPU-bound RL/learn work — is dispatched to a worker thread via
+        asyncio.to_thread() so it never blocks the main event loop. Without
+        this, with hundreds of agents the main loop is pinned and uvicorn
+        cannot service HTTP requests.
+        """
+        import asyncio
+
         events: list[dict] = []
         for agent in self.agents:
             earth_facts = []
             if earth_proxy and await earth_proxy.is_location_resolved(agent.location_id):
                 earth_facts = await earth_proxy.get_resolved_facts(agent.location_id)
 
-            observation = agent.perceive(geography, weather, sim_time, earth_facts=earth_facts, wind=wind)
-
-            # Ingest earth facts for current location BEFORE moving.
-            # The world resolved this location at the start of the tick,
-            # so facts are available now. If we only ingest after moving,
-            # the new location won't be resolved yet and facts are lost.
-            # We call the earth-facts section of _ingest_observation only,
-            # NOT the full method, to avoid duplicating basic facts.
-            if earth_facts:
-                agent._ingest_earth_facts(observation)
-
-            agent.refresh_goal(observation, geography, self._rng)
-            next_location = agent.choose_next_location(observation, geography, weather, self._rng)
+            # Run all sync agent work in a worker thread. This includes
+            # ChromaDB HttpClient calls (sync HTTP) and CPU-bound Q-learning.
             previous_location = agent.location_id
-            agent.apply_action(next_location, geography, tick_interval_seconds=tick_interval)
+            await asyncio.to_thread(
+                self._tick_one_agent_sync_premove,
+                agent, geography, weather, sim_time, earth_facts, wind, tick_interval,
+            )
 
             next_earth_facts = []
             if earth_proxy and await earth_proxy.is_location_resolved(agent.location_id):
                 next_earth_facts = await earth_proxy.get_resolved_facts(agent.location_id)
 
-            next_observation = agent.perceive(geography, weather, sim_time, earth_facts=next_earth_facts, wind=wind)
-            agent.learn(next_observation, tick_count=tick_count)
+            await asyncio.to_thread(
+                self._tick_one_agent_sync_postmove,
+                agent, geography, weather, sim_time, next_earth_facts, wind, tick_count,
+            )
 
             q_value = 0.0
             if agent._last_state_id is not None and agent._last_action_id is not None:
@@ -1634,8 +1651,37 @@ class AgentSystem:
                 }
             )
 
-        self._social_learn(geography=geography, tick_count=tick_count, sim_time=sim_time)
+        # Social learning is also sync (data shuffling + sync chroma writes)
+        # — run it off the main loop too.
+        await asyncio.to_thread(
+            self._social_learn,
+            geography=geography, tick_count=tick_count, sim_time=sim_time,
+        )
         return events
+
+    # --- Per-agent sync helpers (called via asyncio.to_thread) -------------
+
+    def _tick_one_agent_sync_premove(self, agent, geography, weather, sim_time, earth_facts, wind, tick_interval) -> None:
+        """Sync portion of one agent's tick BEFORE moving.
+
+        perceive -> ingest earth facts -> refresh goal -> choose next -> apply move.
+        Runs in a worker thread; safe to do sync HTTP (Chroma) here.
+        """
+        observation = agent.perceive(geography, weather, sim_time, earth_facts=earth_facts, wind=wind)
+        # Ingest earth facts for current location BEFORE moving.
+        if earth_facts:
+            agent._ingest_earth_facts(observation)
+        agent.refresh_goal(observation, geography, self._rng)
+        next_location = agent.choose_next_location(observation, geography, weather, self._rng)
+        agent.apply_action(next_location, geography, tick_interval_seconds=tick_interval)
+
+    def _tick_one_agent_sync_postmove(self, agent, geography, weather, sim_time, next_earth_facts, wind, tick_count) -> None:
+        """Sync portion of one agent's tick AFTER moving.
+
+        perceive new location -> learn. Sync (Chroma writes happen inside learn).
+        """
+        next_observation = agent.perceive(geography, weather, sim_time, earth_facts=next_earth_facts, wind=wind)
+        agent.learn(next_observation, tick_count=tick_count)
 
     # --- Ray parallel tick ------------------------------------------------
 

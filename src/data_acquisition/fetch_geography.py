@@ -53,14 +53,35 @@ GEONAMES_URLS = {
     "SE": "https://download.geonames.org/export/dump/SE.zip",
     "IS": "https://download.geonames.org/export/dump/IS.zip",
     "FI": "https://download.geonames.org/export/dump/FI.zip",
+    # North Africa
+    "MA": "https://download.geonames.org/export/dump/MA.zip",
+    "DZ": "https://download.geonames.org/export/dump/DZ.zip",
+    "TN": "https://download.geonames.org/export/dump/TN.zip",
+    "LY": "https://download.geonames.org/export/dump/LY.zip",
+    "EG": "https://download.geonames.org/export/dump/EG.zip",
+    "EH": "https://download.geonames.org/export/dump/EH.zip",
 }
 ADMIN1_URL = "https://download.geonames.org/export/dump/admin1CodesASCII.txt"
 ADMIN2_URL = "https://download.geonames.org/export/dump/admin2Codes.txt"
 
 DATA_DIR = Path(__file__).parent.parent / "data" / "geography"
 
-# Countries to fetch (can be configured)
-COUNTRIES_TO_FETCH = ["GB", "IE", "FR", "DE", "NL", "BE", "LU", "ES", "PT", "IT", "CH", "AT", "DK", "NO", "SE", "IS", "FI"]
+# Countries to fetch (can be configured).
+# `run()` is idempotent: it filters out countries already in the DB, so adding
+# new ISO codes here triggers an incremental fetch on the next startup
+# (handled by main.py's missing-country detection).
+COUNTRIES_TO_FETCH = [
+    # --- Western / Northern Europe ---
+    "GB", "IE", "FR", "DE", "NL", "BE", "LU", "ES", "PT", "IT", "CH", "AT",
+    "DK", "NO", "SE", "IS", "FI",
+    # --- North Africa ---
+    "MA",  # Morocco
+    "DZ",  # Algeria
+    "TN",  # Tunisia
+    "LY",  # Libya
+    "EG",  # Egypt
+    "EH",  # Western Sahara
+]
 
 # Feature codes that represent meaningful locations for our world
 FEATURE_CLASSES_KEEP = {"A", "H", "L", "P", "R", "S", "T", "V"}
@@ -104,6 +125,9 @@ COUNTRY_NAMES = {
     "IT": "Italy", "CH": "Switzerland", "AT": "Austria",
     "DK": "Denmark", "NO": "Norway", "SE": "Sweden", "IS": "Iceland",
     "FI": "Finland",
+    # North Africa
+    "MA": "Morocco", "DZ": "Algeria", "TN": "Tunisia",
+    "LY": "Libya", "EG": "Egypt", "EH": "Western Sahara",
 }
 
 # UK admin1 code mapping (GeoNames uses ENG, SCT, WLS, NIR)
