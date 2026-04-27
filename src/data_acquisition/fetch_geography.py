@@ -53,13 +53,102 @@ GEONAMES_URLS = {
     "SE": "https://download.geonames.org/export/dump/SE.zip",
     "IS": "https://download.geonames.org/export/dump/IS.zip",
     "FI": "https://download.geonames.org/export/dump/FI.zip",
-    # North Africa
+    # --- North Africa ---
     "MA": "https://download.geonames.org/export/dump/MA.zip",
     "DZ": "https://download.geonames.org/export/dump/DZ.zip",
     "TN": "https://download.geonames.org/export/dump/TN.zip",
     "LY": "https://download.geonames.org/export/dump/LY.zip",
     "EG": "https://download.geonames.org/export/dump/EG.zip",
     "EH": "https://download.geonames.org/export/dump/EH.zip",
+    # --- Eastern Europe ---
+    "PL": "https://download.geonames.org/export/dump/PL.zip",
+    "CZ": "https://download.geonames.org/export/dump/CZ.zip",
+    "SK": "https://download.geonames.org/export/dump/SK.zip",
+    "HU": "https://download.geonames.org/export/dump/HU.zip",
+    "RO": "https://download.geonames.org/export/dump/RO.zip",
+    "BG": "https://download.geonames.org/export/dump/BG.zip",
+    "MD": "https://download.geonames.org/export/dump/MD.zip",
+    "UA": "https://download.geonames.org/export/dump/UA.zip",
+    "BY": "https://download.geonames.org/export/dump/BY.zip",
+    # --- Baltic states ---
+    "EE": "https://download.geonames.org/export/dump/EE.zip",
+    "LV": "https://download.geonames.org/export/dump/LV.zip",
+    "LT": "https://download.geonames.org/export/dump/LT.zip",
+    # --- Balkans ---
+    "RS": "https://download.geonames.org/export/dump/RS.zip",
+    "HR": "https://download.geonames.org/export/dump/HR.zip",
+    "SI": "https://download.geonames.org/export/dump/SI.zip",
+    "BA": "https://download.geonames.org/export/dump/BA.zip",
+    "ME": "https://download.geonames.org/export/dump/ME.zip",
+    "MK": "https://download.geonames.org/export/dump/MK.zip",
+    "AL": "https://download.geonames.org/export/dump/AL.zip",
+    "XK": "https://download.geonames.org/export/dump/XK.zip",
+    # --- Mediterranean Europe ---
+    "GR": "https://download.geonames.org/export/dump/GR.zip",
+    "CY": "https://download.geonames.org/export/dump/CY.zip",
+    "MT": "https://download.geonames.org/export/dump/MT.zip",
+    # --- European microstates ---
+    "MC": "https://download.geonames.org/export/dump/MC.zip",
+    "SM": "https://download.geonames.org/export/dump/SM.zip",
+    "VA": "https://download.geonames.org/export/dump/VA.zip",
+    "AD": "https://download.geonames.org/export/dump/AD.zip",
+    "LI": "https://download.geonames.org/export/dump/LI.zip",
+    # --- European territories / dependencies ---
+    "FO": "https://download.geonames.org/export/dump/FO.zip",
+    "AX": "https://download.geonames.org/export/dump/AX.zip",
+    "SJ": "https://download.geonames.org/export/dump/SJ.zip",
+    "GL": "https://download.geonames.org/export/dump/GL.zip",
+    "GI": "https://download.geonames.org/export/dump/GI.zip",
+    "GG": "https://download.geonames.org/export/dump/GG.zip",
+    "JE": "https://download.geonames.org/export/dump/JE.zip",
+    "IM": "https://download.geonames.org/export/dump/IM.zip",
+    # --- North America (continental) ---
+    "US": "https://download.geonames.org/export/dump/US.zip",
+    "CA": "https://download.geonames.org/export/dump/CA.zip",
+    "MX": "https://download.geonames.org/export/dump/MX.zip",
+    # --- Central America ---
+    "BZ": "https://download.geonames.org/export/dump/BZ.zip",
+    "GT": "https://download.geonames.org/export/dump/GT.zip",
+    "SV": "https://download.geonames.org/export/dump/SV.zip",
+    "HN": "https://download.geonames.org/export/dump/HN.zip",
+    "NI": "https://download.geonames.org/export/dump/NI.zip",
+    "CR": "https://download.geonames.org/export/dump/CR.zip",
+    "PA": "https://download.geonames.org/export/dump/PA.zip",
+    # --- Atlantic / N.A. dependencies ---
+    "BM": "https://download.geonames.org/export/dump/BM.zip",
+    "PM": "https://download.geonames.org/export/dump/PM.zip",
+    # --- Caribbean (sovereign) ---
+    "BS": "https://download.geonames.org/export/dump/BS.zip",
+    "BB": "https://download.geonames.org/export/dump/BB.zip",
+    "CU": "https://download.geonames.org/export/dump/CU.zip",
+    "DM": "https://download.geonames.org/export/dump/DM.zip",
+    "DO": "https://download.geonames.org/export/dump/DO.zip",
+    "GD": "https://download.geonames.org/export/dump/GD.zip",
+    "HT": "https://download.geonames.org/export/dump/HT.zip",
+    "JM": "https://download.geonames.org/export/dump/JM.zip",
+    "KN": "https://download.geonames.org/export/dump/KN.zip",
+    "LC": "https://download.geonames.org/export/dump/LC.zip",
+    "TT": "https://download.geonames.org/export/dump/TT.zip",
+    "VC": "https://download.geonames.org/export/dump/VC.zip",
+    "AG": "https://download.geonames.org/export/dump/AG.zip",
+    # --- Caribbean (US / UK territories) ---
+    "PR": "https://download.geonames.org/export/dump/PR.zip",
+    "VI": "https://download.geonames.org/export/dump/VI.zip",
+    "KY": "https://download.geonames.org/export/dump/KY.zip",
+    "TC": "https://download.geonames.org/export/dump/TC.zip",
+    "VG": "https://download.geonames.org/export/dump/VG.zip",
+    "AI": "https://download.geonames.org/export/dump/AI.zip",
+    "MS": "https://download.geonames.org/export/dump/MS.zip",
+    # --- Caribbean (Netherlands) ---
+    "AW": "https://download.geonames.org/export/dump/AW.zip",
+    "CW": "https://download.geonames.org/export/dump/CW.zip",
+    "SX": "https://download.geonames.org/export/dump/SX.zip",
+    "BQ": "https://download.geonames.org/export/dump/BQ.zip",
+    # --- Caribbean (France) ---
+    "MQ": "https://download.geonames.org/export/dump/MQ.zip",
+    "GP": "https://download.geonames.org/export/dump/GP.zip",
+    "MF": "https://download.geonames.org/export/dump/MF.zip",
+    "BL": "https://download.geonames.org/export/dump/BL.zip",
 }
 ADMIN1_URL = "https://download.geonames.org/export/dump/admin1CodesASCII.txt"
 ADMIN2_URL = "https://download.geonames.org/export/dump/admin2Codes.txt"
@@ -75,12 +164,37 @@ COUNTRIES_TO_FETCH = [
     "GB", "IE", "FR", "DE", "NL", "BE", "LU", "ES", "PT", "IT", "CH", "AT",
     "DK", "NO", "SE", "IS", "FI",
     # --- North Africa ---
-    "MA",  # Morocco
-    "DZ",  # Algeria
-    "TN",  # Tunisia
-    "LY",  # Libya
-    "EG",  # Egypt
-    "EH",  # Western Sahara
+    "MA", "DZ", "TN", "LY", "EG", "EH",
+    # --- Eastern Europe ---
+    "PL", "CZ", "SK", "HU", "RO", "BG", "MD", "UA", "BY",
+    # --- Baltic states ---
+    "EE", "LV", "LT",
+    # --- Balkans ---
+    "RS", "HR", "SI", "BA", "ME", "MK", "AL", "XK",
+    # --- Mediterranean Europe ---
+    "GR", "CY", "MT",
+    # --- European microstates ---
+    "MC", "SM", "VA", "AD", "LI",
+    # --- European territories / dependencies ---
+    "FO", "AX", "SJ", "GL", "GI", "GG", "JE", "IM",
+    # Note: Russia (RU) deliberately excluded — geographically transcontinental;
+    # GeoNames has no continent-level filter so RU.zip would pull in Siberia/
+    # Vladivostok/Kamchatka. Add via lon-filter post-fetch if European Russia
+    # is wanted later.
+    # --- North America (continental) ---
+    "US", "CA", "MX",
+    # --- Central America ---
+    "BZ", "GT", "SV", "HN", "NI", "CR", "PA",
+    # --- Atlantic / N.A. dependencies ---
+    "BM", "PM",
+    # --- Caribbean (sovereign) ---
+    "BS", "BB", "CU", "DM", "DO", "GD", "HT", "JM", "KN", "LC", "TT", "VC", "AG",
+    # --- Caribbean (US / UK territories) ---
+    "PR", "VI", "KY", "TC", "VG", "AI", "MS",
+    # --- Caribbean (Netherlands) ---
+    "AW", "CW", "SX", "BQ",
+    # --- Caribbean (France) ---
+    "MQ", "GP", "MF", "BL",
 ]
 
 # Feature codes that represent meaningful locations for our world
@@ -119,6 +233,7 @@ FEATURE_CODE_TO_TYPE = {
 
 # Country code to name mapping
 COUNTRY_NAMES = {
+    # Western / Northern Europe
     "GB": "United Kingdom", "IE": "Ireland", "FR": "France",
     "DE": "Germany", "NL": "Netherlands", "BE": "Belgium",
     "LU": "Luxembourg", "ES": "Spain", "PT": "Portugal",
@@ -128,6 +243,48 @@ COUNTRY_NAMES = {
     # North Africa
     "MA": "Morocco", "DZ": "Algeria", "TN": "Tunisia",
     "LY": "Libya", "EG": "Egypt", "EH": "Western Sahara",
+    # Eastern Europe
+    "PL": "Poland", "CZ": "Czech Republic", "SK": "Slovakia",
+    "HU": "Hungary", "RO": "Romania", "BG": "Bulgaria",
+    "MD": "Moldova", "UA": "Ukraine", "BY": "Belarus",
+    # Baltic states
+    "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania",
+    # Balkans
+    "RS": "Serbia", "HR": "Croatia", "SI": "Slovenia",
+    "BA": "Bosnia and Herzegovina", "ME": "Montenegro",
+    "MK": "North Macedonia", "AL": "Albania", "XK": "Kosovo",
+    # Mediterranean Europe
+    "GR": "Greece", "CY": "Cyprus", "MT": "Malta",
+    # European microstates
+    "MC": "Monaco", "SM": "San Marino", "VA": "Vatican City",
+    "AD": "Andorra", "LI": "Liechtenstein",
+    # European territories / dependencies
+    "FO": "Faroe Islands", "AX": "Åland Islands",
+    "SJ": "Svalbard and Jan Mayen", "GL": "Greenland",
+    "GI": "Gibraltar", "GG": "Guernsey", "JE": "Jersey", "IM": "Isle of Man",
+    # North America
+    "US": "United States", "CA": "Canada", "MX": "Mexico",
+    # Central America
+    "BZ": "Belize", "GT": "Guatemala", "SV": "El Salvador",
+    "HN": "Honduras", "NI": "Nicaragua", "CR": "Costa Rica", "PA": "Panama",
+    # Atlantic dependencies
+    "BM": "Bermuda", "PM": "Saint Pierre and Miquelon",
+    # Caribbean (sovereign)
+    "BS": "Bahamas", "BB": "Barbados", "CU": "Cuba",
+    "DM": "Dominica", "DO": "Dominican Republic", "GD": "Grenada",
+    "HT": "Haiti", "JM": "Jamaica", "KN": "Saint Kitts and Nevis",
+    "LC": "Saint Lucia", "TT": "Trinidad and Tobago",
+    "VC": "Saint Vincent and the Grenadines", "AG": "Antigua and Barbuda",
+    # Caribbean (US / UK territories)
+    "PR": "Puerto Rico", "VI": "U.S. Virgin Islands",
+    "KY": "Cayman Islands", "TC": "Turks and Caicos Islands",
+    "VG": "British Virgin Islands", "AI": "Anguilla", "MS": "Montserrat",
+    # Caribbean (Netherlands)
+    "AW": "Aruba", "CW": "Curaçao", "SX": "Sint Maarten",
+    "BQ": "Bonaire, Sint Eustatius and Saba",
+    # Caribbean (France)
+    "MQ": "Martinique", "GP": "Guadeloupe",
+    "MF": "Saint Martin", "BL": "Saint Barthélemy",
 }
 
 # UK admin1 code mapping (GeoNames uses ENG, SCT, WLS, NIR)
