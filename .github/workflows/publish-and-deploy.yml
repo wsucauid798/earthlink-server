@@ -107,6 +107,11 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
+          # `systemctl restart earthlink-stack` blocks until the unit is active
+          # (Type=oneshot RemainAfterExit=yes). The unit's TimeoutStartSec is
+          # 1800s to absorb slow first-time image pulls; this command_timeout
+          # must be at least that, plus headroom.
+          command_timeout: 30m
           # Strict host key checking — populate VPS_SSH_HOST_KEY secret
           # to enable. Default leaves it off; configure once stable.
           # known_hosts: ${{ secrets.VPS_SSH_HOST_KEY }}
