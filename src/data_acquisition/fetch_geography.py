@@ -160,29 +160,42 @@ DATA_DIR = Path(__file__).parent.parent / "data" / "geography"
 # new ISO codes here triggers an incremental fetch on the next startup
 # (handled by main.py's missing-country detection).
 COUNTRIES_TO_FETCH = [
+    # `run()` streams per-country: each country fully parsed, inserted, and
+    # committed before the next begins. Memory is bounded to a single country's
+    # peak. Russia (RU) is intentionally excluded — geographically transcontinental
+    # and GeoNames RU.zip has no continent filter.
+
     # --- Western / Northern Europe ---
     "GB", "IE", "FR", "DE", "NL", "BE", "LU", "ES", "PT", "IT", "CH", "AT",
     "DK", "NO", "SE", "IS", "FI",
     # --- North Africa ---
     "MA", "DZ", "TN", "LY", "EG", "EH",
-    # --- ROLLED BACK: full Europe + North America expansion ---
-    # The 75-country bulk-seed in main lifespan blew through 24 GB RAM
-    # (millions of in-memory location objects + 50–100M in-memory connection
-    # objects before any DB write) and OOM-killed the host. Recovery: VPS
-    # was hard-rebooted, server container manually stopped to prevent the
-    # seed from re-firing on every startup.
-    #
-    # The URL and name dictionaries above retain entries for all the
-    # additional countries (so re-adding them is just a list change here),
-    # but we are NOT re-enabling the bulk seed until the seed flow is
-    # rewritten to:
-    #   (a) parse + insert + connection-generate per country (commit before
-    #       moving to the next country, no cross-country in-memory accumulation),
-    #   (b) stream connection generation rather than building millions of
-    #       objects in memory,
-    #   (c) optionally run as a separate one-shot container with a memory
-    #       cap so OOM kills the seed cleanly without taking out the host.
-    # Tracked as future work; see server-design-plan.md.
+    # --- Eastern Europe ---
+    "PL", "CZ", "SK", "HU", "RO", "BG", "MD", "UA", "BY",
+    # --- Baltic states ---
+    "EE", "LV", "LT",
+    # --- Balkans ---
+    "RS", "HR", "SI", "BA", "ME", "MK", "AL", "XK",
+    # --- Mediterranean Europe ---
+    "GR", "CY", "MT",
+    # --- European microstates ---
+    "MC", "SM", "VA", "AD", "LI",
+    # --- European territories / dependencies ---
+    "FO", "AX", "SJ", "GL", "GI", "GG", "JE", "IM",
+    # --- North America (continental) ---
+    "US", "CA", "MX",
+    # --- Central America ---
+    "BZ", "GT", "SV", "HN", "NI", "CR", "PA",
+    # --- Atlantic / N.A. dependencies ---
+    "BM", "PM",
+    # --- Caribbean (sovereign) ---
+    "BS", "BB", "CU", "DM", "DO", "GD", "HT", "JM", "KN", "LC", "TT", "VC", "AG",
+    # --- Caribbean (US / UK territories) ---
+    "PR", "VI", "KY", "TC", "VG", "AI", "MS",
+    # --- Caribbean (Netherlands) ---
+    "AW", "CW", "SX", "BQ",
+    # --- Caribbean (France) ---
+    "MQ", "GP", "MF", "BL",
 ]
 
 # Feature codes that represent meaningful locations for our world
@@ -584,8 +597,45 @@ async def insert_connections(
     logger.info(f"Committed {inserted} connections to database")
 
 
+async def _seed_one_country(country_code: str, admin_codes: dict[str, str]) -> tuple[int, int]:
+    """Seed a single country: parse, insert locations, generate connections, insert connections, commit.
+
+    Memory is bounded by this single country's data — locations + connections lists go
+    out of scope on return and are GC'd before the next country starts. The previous
+    flow accumulated all countries' data in memory before any insert, which OOM-killed
+    a 24 GB host on the 75-country bulk seed (commit 759c591).
+
+    Returns (n_locations_inserted, n_connections_inserted).
+    """
+    logger.info(f"Fetching data for {country_code}...")
+    locations = await fetch_and_parse_geography(country_code, admin_codes)
+    if not locations:
+        logger.info(f"No usable locations from {country_code}, skipping")
+        return (0, 0)
+
+    connections = generate_connections(locations)
+
+    async with async_session() as session:
+        geoname_to_db_id = await insert_locations(session, locations)
+
+    async with async_session() as session:
+        await insert_connections(session, connections, geoname_to_db_id)
+
+    n_locs = len(locations)
+    n_conns = len(connections)
+    # Free references explicitly so the next country starts from a clean baseline.
+    del locations, connections, geoname_to_db_id
+    return (n_locs, n_conns)
+
+
 async def run():
-    """Main entry point: download, parse, and insert geography data for configured countries."""
+    """Main entry point: stream-seed geography per-country.
+
+    Each country is fully processed (parse → insert locations → generate connections
+    → insert connections → commit) before the next country begins. This bounds peak
+    memory to the size of one country's data — important on small VPS hosts where
+    the previous parse-all-then-insert-all flow would OOM.
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
     logger.info(f"=== Fetching Geography Data for {', '.join(COUNTRIES_TO_FETCH)} ===")
@@ -613,29 +663,32 @@ async def run():
 
     logger.info(f"Will fetch: {', '.join(countries_to_fetch)}")
 
-    # Load admin codes for countries we're actually fetching
+    # Load admin codes once for all countries we're fetching
     admin_codes = await load_admin_codes(countries_to_fetch)
 
-    # Fetch and parse data for each country
-    all_locations = []
-    for country_code in countries_to_fetch:
-        logger.info(f"Fetching data for {country_code}...")
-        locations = await fetch_and_parse_geography(country_code, admin_codes)
-        all_locations.extend(locations)
+    # Stream-seed: one country at a time, fully committed before moving on.
+    # If the process is killed mid-way, completed countries are durably persisted
+    # and the next startup will skip them via the existing-country check above.
+    total_locs = 0
+    total_conns = 0
+    for i, country_code in enumerate(countries_to_fetch, start=1):
+        logger.info(
+            f"--- [{i}/{len(countries_to_fetch)}] {country_code} "
+            f"({COUNTRY_NAMES.get(country_code, country_code)}) ---"
+        )
+        n_locs, n_conns = await _seed_one_country(country_code, admin_codes)
+        total_locs += n_locs
+        total_conns += n_conns
+        logger.info(
+            f"--- {country_code} done: +{n_locs} locations, +{n_conns} connections "
+            f"(running totals: {total_locs} / {total_conns}) ---"
+        )
 
-    logger.info(f"Total locations parsed: {len(all_locations)}")
-
-    # Generate connections across all locations
-    connections = generate_connections(all_locations)
-
-    # Insert into database
-    async with async_session() as session:
-        geoname_to_db_id = await insert_locations(session, all_locations)
-
-    async with async_session() as session:
-        await insert_connections(session, connections, geoname_to_db_id)
-
-    logger.info("=== Geography data acquisition complete ===")
+    logger.info(
+        f"=== Geography data acquisition complete: "
+        f"{total_locs} locations, {total_conns} connections across "
+        f"{len(countries_to_fetch)} countries ==="
+    )
 
 
 if __name__ == "__main__":
