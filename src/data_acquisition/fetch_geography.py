@@ -165,36 +165,24 @@ COUNTRIES_TO_FETCH = [
     "DK", "NO", "SE", "IS", "FI",
     # --- North Africa ---
     "MA", "DZ", "TN", "LY", "EG", "EH",
-    # --- Eastern Europe ---
-    "PL", "CZ", "SK", "HU", "RO", "BG", "MD", "UA", "BY",
-    # --- Baltic states ---
-    "EE", "LV", "LT",
-    # --- Balkans ---
-    "RS", "HR", "SI", "BA", "ME", "MK", "AL", "XK",
-    # --- Mediterranean Europe ---
-    "GR", "CY", "MT",
-    # --- European microstates ---
-    "MC", "SM", "VA", "AD", "LI",
-    # --- European territories / dependencies ---
-    "FO", "AX", "SJ", "GL", "GI", "GG", "JE", "IM",
-    # Note: Russia (RU) deliberately excluded — geographically transcontinental;
-    # GeoNames has no continent-level filter so RU.zip would pull in Siberia/
-    # Vladivostok/Kamchatka. Add via lon-filter post-fetch if European Russia
-    # is wanted later.
-    # --- North America (continental) ---
-    "US", "CA", "MX",
-    # --- Central America ---
-    "BZ", "GT", "SV", "HN", "NI", "CR", "PA",
-    # --- Atlantic / N.A. dependencies ---
-    "BM", "PM",
-    # --- Caribbean (sovereign) ---
-    "BS", "BB", "CU", "DM", "DO", "GD", "HT", "JM", "KN", "LC", "TT", "VC", "AG",
-    # --- Caribbean (US / UK territories) ---
-    "PR", "VI", "KY", "TC", "VG", "AI", "MS",
-    # --- Caribbean (Netherlands) ---
-    "AW", "CW", "SX", "BQ",
-    # --- Caribbean (France) ---
-    "MQ", "GP", "MF", "BL",
+    # --- ROLLED BACK: full Europe + North America expansion ---
+    # The 75-country bulk-seed in main lifespan blew through 24 GB RAM
+    # (millions of in-memory location objects + 50–100M in-memory connection
+    # objects before any DB write) and OOM-killed the host. Recovery: VPS
+    # was hard-rebooted, server container manually stopped to prevent the
+    # seed from re-firing on every startup.
+    #
+    # The URL and name dictionaries above retain entries for all the
+    # additional countries (so re-adding them is just a list change here),
+    # but we are NOT re-enabling the bulk seed until the seed flow is
+    # rewritten to:
+    #   (a) parse + insert + connection-generate per country (commit before
+    #       moving to the next country, no cross-country in-memory accumulation),
+    #   (b) stream connection generation rather than building millions of
+    #       objects in memory,
+    #   (c) optionally run as a separate one-shot container with a memory
+    #       cap so OOM kills the seed cleanly without taking out the host.
+    # Tracked as future work; see server-design-plan.md.
 ]
 
 # Feature codes that represent meaningful locations for our world
