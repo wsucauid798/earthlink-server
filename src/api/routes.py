@@ -115,10 +115,39 @@ async def ask_agent(agent_id: str, question: str = Query(..., min_length=1, desc
 # Define /locations/geojson BEFORE /locations/{location_id} so "geojson" is not parsed as location_id (422).
 
 @router.get("/locations/geojson")
-async def get_locations_geojson():
-    """All locations as a GeoJSON FeatureCollection — streamed from DB."""
+async def get_locations_geojson(
+    bbox: str | None = Query(
+        None,
+        description="Optional viewport bbox 'west,south,east,north' in lng/lat. Returns only locations inside.",
+    ),
+    zoom: float | None = Query(
+        None,
+        ge=0,
+        le=22,
+        description="Optional MapLibre zoom. Lower zoom returns a sparser type tier (capital/city); higher zoom adds town, village, settlement.",
+    ),
+):
+    """Populated locations as a GeoJSON FeatureCollection.
+
+    Volume control is bbox + zoom from the client, not a hardcoded
+    population filter. Default (no params) returns the global overview tier.
+    """
     world = get_world()
-    features = await world.geography.query_locations_geojson()
+    parsed_bbox: tuple[float, float, float, float] | None = None
+    if bbox:
+        try:
+            parts = [float(p) for p in bbox.split(",")]
+            if len(parts) != 4:
+                raise ValueError
+            parsed_bbox = (parts[0], parts[1], parts[2], parts[3])
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="bbox must be 'west,south,east,north' as four floats",
+            )
+    features = await world.geography.query_locations_geojson(
+        bbox=parsed_bbox, zoom=zoom,
+    )
     return {"type": "FeatureCollection", "features": features}
 
 

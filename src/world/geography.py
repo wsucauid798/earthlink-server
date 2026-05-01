@@ -200,27 +200,68 @@ class Geography:
                 locations.append(loc)
             return locations
 
-    async def query_locations_geojson(self) -> list[dict]:
+    # Zoom -> additional location types to include. Lower zoom = sparser
+    # set (overview); higher zoom = denser set (close-in detail).
+    # All tiers always include capital + city.
+    _GEOJSON_ZOOM_TYPES = [
+        # (min_zoom_for_this_set, types_added)
+        (0,  ("capital", "city")),
+        (5,  ("town",)),
+        (9,  ("village",)),
+        (12, ("settlement",)),
+    ]
+
+    @classmethod
+    def _types_for_zoom(cls, zoom: float | None) -> tuple[str, ...]:
+        """Return the location types to include for a given zoom level."""
+        z = 0 if zoom is None else float(zoom)
+        included: list[str] = []
+        for min_z, types in cls._GEOJSON_ZOOM_TYPES:
+            if z >= min_z:
+                included.extend(types)
+        return tuple(included)
+
+    async def query_locations_geojson(
+        self,
+        bbox: tuple[float, float, float, float] | None = None,
+        zoom: float | None = None,
+    ) -> list[dict]:
         """Populated locations as GeoJSON features for map rendering.
 
-        Returns every populated-place row regardless of population
-        (capital / city / town / village / settlement). The previous
-        `population >= 500` filter rejected legitimate places where
-        GeoNames just lacks population data — e.g. ~88% of Canadian
-        towns have NULL population, so Canada looked empty on the map.
-        Volume management belongs in the frontend (clustering, viewport
-        queries), not in a population heuristic at the source.
+        Args:
+          bbox: optional (west, south, east, north) viewport. When provided,
+                only locations inside the box are returned.
+          zoom: optional MapLibre zoom level. Determines which place types
+                are included — lower zoom = sparser set (capitals/cities only),
+                higher zoom = adds town, village, settlement. See
+                `_GEOJSON_ZOOM_TYPES`.
+
+        Volume is managed at the right layer (viewport + zoom from the client),
+        not by a hardcoded population threshold. Default (no params) returns
+        the global overview tier (capital + city) — small enough for a fast
+        initial load.
         """
-        async with self._session_factory() as session:
-            result = await session.execute(
-                select(
-                    LocationModel.id, LocationModel.name, LocationModel.type,
-                    LocationModel.lat, LocationModel.lng,
-                    LocationModel.population, LocationModel.admin_level_2,
-                ).where(
-                    LocationModel.type.in_(("capital", "city", "town", "village", "settlement"))
-                )
+        types = self._types_for_zoom(zoom)
+        stmt = select(
+            LocationModel.id, LocationModel.name, LocationModel.type,
+            LocationModel.lat, LocationModel.lng,
+            LocationModel.population, LocationModel.admin_level_2,
+        ).where(LocationModel.type.in_(types))
+
+        if bbox is not None:
+            west, south, east, north = bbox
+            # Simple lat/lng bounding box. Doesn't handle the antimeridian,
+            # which is fine for typical viewports; if the box wraps the
+            # 180°E/W line MapLibre splits it into two requests itself.
+            stmt = stmt.where(
+                LocationModel.lat >= south,
+                LocationModel.lat <= north,
+                LocationModel.lng >= west,
+                LocationModel.lng <= east,
             )
+
+        async with self._session_factory() as session:
+            result = await session.execute(stmt)
             return [
                 {
                     "type": "Feature",
