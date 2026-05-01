@@ -203,8 +203,13 @@ class Geography:
     async def query_locations_geojson(self) -> list[dict]:
         """Populated locations as GeoJSON features for map rendering.
 
-        Returns capitals, cities, and towns with population >= 500.
-        Keeps the frontend payload manageable (~55K features for Western Europe).
+        Returns every populated-place row regardless of population
+        (capital / city / town / village / settlement). The previous
+        `population >= 500` filter rejected legitimate places where
+        GeoNames just lacks population data — e.g. ~88% of Canadian
+        towns have NULL population, so Canada looked empty on the map.
+        Volume management belongs in the frontend (clustering, viewport
+        queries), not in a population heuristic at the source.
         """
         async with self._session_factory() as session:
             result = await session.execute(
@@ -213,8 +218,7 @@ class Geography:
                     LocationModel.lat, LocationModel.lng,
                     LocationModel.population, LocationModel.admin_level_2,
                 ).where(
-                    (LocationModel.type.in_(("capital", "city")))
-                    | ((LocationModel.type == "town") & (LocationModel.population >= 500))
+                    LocationModel.type.in_(("capital", "city", "town", "village", "settlement"))
                 )
             )
             return [
