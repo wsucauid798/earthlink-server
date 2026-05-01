@@ -369,7 +369,7 @@ class World:
             self.wind.update(self.time.current_time)
         self.atmosphere._current.clear()
         from agents.system import AgentSystem
-        self.agents = AgentSystem.bootstrap(
+        self.agents = await AgentSystem.bootstrap(
             geography=self.geography,
             count=self.config.agent_count,
             learning_rate=self.config.agent_learning_rate,

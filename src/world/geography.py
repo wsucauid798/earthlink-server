@@ -305,7 +305,70 @@ class Geography:
             return [row[0] for row in result.all()]
 
     async def get_spawn_locations(self, types: list[str], limit: int = 200) -> list[LocationData]:
-        """Get candidate spawn locations for agents, sorted by population."""
+        """Get candidate spawn locations with broad country coverage.
+
+        We rank locations by population *within each country* first, then
+        interleave ranks globally (all rank-1 rows, then rank-2, etc.).
+        This keeps candidates high-quality while spreading initial deployment
+        across the countries currently present in the dataset.
+        """
+        if limit <= 0:
+            return []
+
+        async with self._session_factory() as session:
+            country_count_result = await session.execute(
+                select(func.count(func.distinct(LocationModel.admin_level_1))).where(
+                    LocationModel.type.in_(types),
+                    LocationModel.population > 0,
+                    LocationModel.admin_level_1.is_not(None),
+                    LocationModel.admin_level_1 != "",
+                )
+            )
+            country_count = int(country_count_result.scalar_one() or 0)
+
+            if country_count <= 0:
+                return await self.get_top_locations_by_population(types, limit)
+
+            per_country = max(1, (limit + country_count - 1) // country_count)
+
+            ranked = (
+                select(
+                    LocationModel.id.label("id"),
+                    func.row_number().over(
+                        partition_by=LocationModel.admin_level_1,
+                        order_by=LocationModel.population.desc().nullslast(),
+                    ).label("country_rank"),
+                )
+                .where(
+                    LocationModel.type.in_(types),
+                    LocationModel.population > 0,
+                    LocationModel.admin_level_1.is_not(None),
+                    LocationModel.admin_level_1 != "",
+                )
+                .subquery()
+            )
+
+            result = await session.execute(
+                select(LocationModel)
+                .join(ranked, ranked.c.id == LocationModel.id)
+                .where(ranked.c.country_rank <= per_country)
+                .order_by(
+                    ranked.c.country_rank.asc(),
+                    LocationModel.population.desc().nullslast(),
+                )
+                .limit(limit)
+            )
+
+            locations: list[LocationData] = []
+            for model in result.scalars().all():
+                loc = _location_from_model(model)
+                self._loc_cache.put(loc.id, loc)
+                locations.append(loc)
+
+            if locations:
+                return locations
+
+        # Safe fallback to prior behaviour if the balanced query yields nothing.
         return await self.get_top_locations_by_population(types, limit)
 
     # --- Cache warming (LOD pattern — called before agent tick) ---
