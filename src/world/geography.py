@@ -4,7 +4,7 @@ import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from db.models import Location as LocationModel
@@ -337,19 +337,29 @@ class Geography:
     async def get_spawn_locations(self, types: list[str], limit: int = 200) -> list[LocationData]:
         """Get candidate spawn locations with broad country coverage.
 
-        We rank locations by population *within each country* first, then
+        We rank locations by quality *within each country* first, then
         interleave ranks globally (all rank-1 rows, then rank-2, etc.).
-        This keeps candidates high-quality while spreading initial deployment
-        across the countries currently present in the dataset.
+        Quality prefers populated places but still includes places with
+        unknown/zero population so countries with sparse population metadata
+        are not excluded from initial agent deployment.
         """
         if limit <= 0:
             return []
+
+        quality_order = [
+            case(
+                (LocationModel.population.is_(None), 1),
+                (LocationModel.population <= 0, 1),
+                else_=0,
+            ).asc(),
+            LocationModel.population.desc().nullslast(),
+            LocationModel.id.asc(),
+        ]
 
         async with self._session_factory() as session:
             country_count_result = await session.execute(
                 select(func.count(func.distinct(LocationModel.admin_level_1))).where(
                     LocationModel.type.in_(types),
-                    LocationModel.population > 0,
                     LocationModel.admin_level_1.is_not(None),
                     LocationModel.admin_level_1 != "",
                 )
@@ -357,7 +367,18 @@ class Geography:
             country_count = int(country_count_result.scalar_one() or 0)
 
             if country_count <= 0:
-                return await self.get_top_locations_by_population(types, limit)
+                result = await session.execute(
+                    select(LocationModel)
+                    .where(LocationModel.type.in_(types))
+                    .order_by(*quality_order)
+                    .limit(limit)
+                )
+                locations: list[LocationData] = []
+                for model in result.scalars().all():
+                    loc = _location_from_model(model)
+                    self._loc_cache.put(loc.id, loc)
+                    locations.append(loc)
+                return locations
 
             per_country = max(1, (limit + country_count - 1) // country_count)
 
@@ -366,12 +387,11 @@ class Geography:
                     LocationModel.id.label("id"),
                     func.row_number().over(
                         partition_by=LocationModel.admin_level_1,
-                        order_by=LocationModel.population.desc().nullslast(),
+                        order_by=quality_order,
                     ).label("country_rank"),
                 )
                 .where(
                     LocationModel.type.in_(types),
-                    LocationModel.population > 0,
                     LocationModel.admin_level_1.is_not(None),
                     LocationModel.admin_level_1 != "",
                 )
@@ -384,7 +404,7 @@ class Geography:
                 .where(ranked.c.country_rank <= per_country)
                 .order_by(
                     ranked.c.country_rank.asc(),
-                    LocationModel.population.desc().nullslast(),
+                    *quality_order,
                 )
                 .limit(limit)
             )
