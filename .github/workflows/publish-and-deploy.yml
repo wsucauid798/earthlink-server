@@ -107,17 +107,18 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          # `systemctl restart earthlink-stack` blocks until the unit is active
-          # (Type=oneshot RemainAfterExit=yes). The unit's TimeoutStartSec is
-          # 1800s to absorb slow first-time image pulls; this command_timeout
-          # must be at least that, plus headroom.
-          command_timeout: 30m
+          # Pre-pull the image as wsawyerr (in docker group) BEFORE restart,
+          # so the slow network pull is decoupled from the systemd unit start.
+          # `systemctl restart` becomes fast (image cached → ExecStartPre no-op).
+          command_timeout: 60m
           # Strict host key checking — populate VPS_SSH_HOST_KEY secret
           # to enable. Default leaves it off; configure once stable.
           # known_hosts: ${{ secrets.VPS_SSH_HOST_KEY }}
           script: |
             set -euo pipefail
-            echo "Restarting earthlink-stack.service (pulls newest image, then up -d)"
+            echo "Pre-pulling latest image (decoupled from systemd unit)"
+            docker pull ghcr.io/${{ github.repository_owner }}/earthlink-server:latest
+            echo "Restarting earthlink-stack.service (image already cached)"
             sudo /bin/systemctl restart earthlink-stack
             # Brief settle window, then status
             sleep 5
