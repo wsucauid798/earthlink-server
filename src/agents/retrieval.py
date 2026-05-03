@@ -7,15 +7,50 @@ lightweight token-overlap scoring.
 Chroma is the right tool for this: embeddings are computed once when
 facts are stored, and queries are fast similarity searches — not
 re-encoding the entire fact list on every question.
+
+All chroma calls are wrapped in a hard per-call timeout via a shared
+ThreadPoolExecutor. Without this, a hung chroma server (sync HttpClient
+has no built-in request timeout) parks the asyncio.to_thread worker
+calling it forever, which in turn freezes the agent tick loop on the
+first iteration after startup. See server-design-plan S98.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Iterable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from typing import Callable, Iterable, TypeVar
 
 logger = logging.getLogger(__name__)
+
+# Per-call timeout for any chroma operation. Generous enough for normal
+# operation, tight enough that a dead chroma can't freeze the sim tick.
+_CHROMA_CALL_TIMEOUT_SECONDS = 5.0
+
+# Shared executor for chroma calls. Single pool serves all agent fact
+# stores; size scales with expected concurrent in-flight chroma calls
+# (one per agent tick under sequential mode is fine, more under Ray).
+_CHROMA_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="chroma")
+
+_T = TypeVar("_T")
+
+
+def _chroma_call(fn: Callable[[], _T], default: _T, op: str) -> _T:
+    """Run a chroma call under a hard timeout. Return default on failure."""
+    future = _CHROMA_EXECUTOR.submit(fn)
+    try:
+        return future.result(timeout=_CHROMA_CALL_TIMEOUT_SECONDS)
+    except FutureTimeoutError:
+        future.cancel()
+        logger.warning(
+            f"Chroma {op} timed out after {_CHROMA_CALL_TIMEOUT_SECONDS}s — "
+            f"chroma server may be unresponsive"
+        )
+        return default
+    except Exception as e:
+        logger.debug(f"Chroma {op} failed: {e}")
+        return default
 
 
 class ChromaFactStore:
@@ -34,14 +69,25 @@ class ChromaFactStore:
 
         try:
             import chromadb
-            self._client = chromadb.HttpClient(host=chroma_host, port=chroma_port)
-            # One collection per agent — agent's own knowledge
-            collection_name = f"agent_{agent_id.replace('-', '_')[:50]}"
-            self._collection = self._client.get_or_create_collection(
-                name=collection_name,
-                metadata={"agent_id": agent_id},
+            # Wrap connect + collection setup in the same hard timeout —
+            # chroma can hang at startup too (e.g. unhealthy container).
+            client = _chroma_call(
+                lambda: chromadb.HttpClient(host=chroma_host, port=chroma_port),
+                default=None, op="connect",
             )
-            logger.debug(f"Chroma collection ready for agent {agent_id}")
+            if client is None:
+                self._collection = None
+                return
+            self._client = client
+            collection_name = f"agent_{agent_id.replace('-', '_')[:50]}"
+            self._collection = _chroma_call(
+                lambda: client.get_or_create_collection(
+                    name=collection_name, metadata={"agent_id": agent_id},
+                ),
+                default=None, op="get_or_create_collection",
+            )
+            if self._collection is not None:
+                logger.debug(f"Chroma collection ready for agent {agent_id}")
         except Exception as e:
             logger.debug(f"Chroma not available for agent {agent_id}: {e}")
             self._collection = None
@@ -54,14 +100,16 @@ class ChromaFactStore:
         """Add a fact to the agent's vector store. Embedding computed once."""
         if not self._collection or not text.strip():
             return
-        try:
-            self._collection.upsert(
-                ids=[fact_id],
-                documents=[text.strip()],
-                metadatas=[metadata or {}],
-            )
-        except Exception as e:
-            logger.debug(f"Chroma add_fact failed: {e}")
+        collection = self._collection
+        clean_text = text.strip()
+        meta = metadata or {}
+        _chroma_call(
+            lambda: collection.upsert(
+                ids=[fact_id], documents=[clean_text], metadatas=[meta],
+            ),
+            default=None,
+            op="add_fact",
+        )
 
     def query(self, question: str, top_k: int = 5) -> list[tuple[float, str, dict]]:
         """Query agent's knowledge by semantic similarity.
@@ -70,36 +118,33 @@ class ChromaFactStore:
         """
         if not self._collection:
             return []
-        try:
-            results = self._collection.query(
-                query_texts=[question],
-                n_results=top_k,
-            )
-            output: list[tuple[float, str, dict]] = []
-            if results and results.get("documents"):
-                docs = results["documents"][0]
-                distances = results.get("distances", [[]])[0]
-                metadatas = results.get("metadatas", [[]])[0]
-                for i, doc in enumerate(docs):
-                    # Chroma returns distances (lower = more similar)
-                    # Convert to similarity score (higher = better)
-                    distance = distances[i] if i < len(distances) else 1.0
-                    score = max(0.0, 1.0 - distance)
-                    meta = metadatas[i] if i < len(metadatas) else {}
-                    output.append((score, doc, meta))
-            return output
-        except Exception as e:
-            logger.debug(f"Chroma query failed: {e}")
+        collection = self._collection
+        results = _chroma_call(
+            lambda: collection.query(query_texts=[question], n_results=top_k),
+            default=None,
+            op="query",
+        )
+        if not results or not results.get("documents"):
             return []
+        output: list[tuple[float, str, dict]] = []
+        docs = results["documents"][0]
+        distances = results.get("distances", [[]])[0]
+        metadatas = results.get("metadatas", [[]])[0]
+        for i, doc in enumerate(docs):
+            # Chroma returns distances (lower = more similar)
+            # Convert to similarity score (higher = better)
+            distance = distances[i] if i < len(distances) else 1.0
+            score = max(0.0, 1.0 - distance)
+            meta = metadatas[i] if i < len(metadatas) else {}
+            output.append((score, doc, meta))
+        return output
 
     @property
     def count(self) -> int:
         if not self._collection:
             return 0
-        try:
-            return self._collection.count()
-        except Exception:
-            return 0
+        collection = self._collection
+        return _chroma_call(lambda: collection.count(), default=0, op="count")
 
 
 class SemanticFactRetriever:

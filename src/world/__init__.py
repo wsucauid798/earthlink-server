@@ -415,9 +415,20 @@ class World:
         logger.info("World reset")
 
     async def _tick_loop(self) -> None:
-        """The heartbeat of the world."""
+        """The heartbeat of the world.
+
+        Logs a heartbeat per N ticks so a stalled loop is visible from
+        the journal without needing the deeper per-50-tick stats line.
+        """
+        HEARTBEAT_EVERY = 5
         while self._running:
+            tick_start = _time.monotonic()
             await self.tick()
+            tick_wall_ms = (_time.monotonic() - tick_start) * 1000
+            if self.time.tick_count % HEARTBEAT_EVERY == 0:
+                logger.info(
+                    f"heartbeat: tick={self.time.tick_count} wall_ms={tick_wall_ms:.0f}"
+                )
             await asyncio.sleep(self.config.tick_interval_seconds)
 
     # --- Refresh Schedulers ---
