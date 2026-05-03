@@ -11,6 +11,7 @@ Broadcast model (current spike):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -198,7 +199,14 @@ _wt_server = None
 
 
 async def start_wt_server() -> None:
-    """Start QUIC/WT listener for world streaming."""
+    """Start QUIC/WT listener for world streaming.
+
+    The cert is provisioned by Caddy via ACME DNS-01 (Let's Encrypt) and
+    written to a shared volume. On a fresh stack `caddy` and `server`
+    start in parallel; the cert may not exist for the first ~30s while
+    Caddy completes its DNS-01 challenge. We poll for cert availability
+    instead of crashing the server.
+    """
     global _wt_server
 
     if _wt_server is not None:
@@ -213,6 +221,24 @@ async def start_wt_server() -> None:
         raise RuntimeError(
             "WebTransport startup failed: set EARTHLINK_WT_CERT_PATH and EARTHLINK_WT_KEY_PATH"
         )
+
+    # Wait for the cert to appear (Caddy DNS-01 takes ~10–30s on first run).
+    # Cap the wait at 5 min — beyond that something is wrong with provisioning
+    # and we want a loud failure rather than an infinite hang.
+    import os as _os
+    wait_deadline = asyncio.get_running_loop().time() + 300
+    while not (_os.path.isfile(cert_path) and _os.path.isfile(key_path)):
+        if asyncio.get_running_loop().time() > wait_deadline:
+            raise RuntimeError(
+                f"WebTransport startup failed: cert not available after 5 min "
+                f"(cert_path={cert_path}, key_path={key_path}). "
+                "Check Caddy ACME logs."
+            )
+        logger.info(
+            "WebTransport waiting for ACME cert at %s (Caddy may still be issuing)…",
+            cert_path,
+        )
+        await asyncio.sleep(5)
 
     try:
         configuration = QuicConfiguration(
