@@ -2132,6 +2132,43 @@ class AgentSystem:
             return _ray.get(futures)
         return [agent.to_persisted() for agent in self.agents]
 
+    def country_coverage(self, geography: Geography) -> set[str]:
+        """Return represented admin_level_1 countries across current agents."""
+        countries: set[str] = set()
+        for agent in self.agents:
+            loc = geography.get_location(agent.location_id)
+            if loc and loc.admin_level_1:
+                country = loc.admin_level_1.strip()
+                if country:
+                    countries.add(country)
+        return countries
+
+    def redeploy_to_spawn_pool(self, spawn_pool: list[LocationData]) -> int:
+        """Reassign all agent locations across a balanced spawn pool.
+
+        Preserves agent identity and learned state while re-homing placement
+        to match current available geography coverage.
+        """
+        if not self.agents or not spawn_pool:
+            return 0
+
+        moved = 0
+        pool_size = len(spawn_pool)
+        for i, agent in enumerate(self.agents):
+            target = spawn_pool[i % pool_size]
+            if agent.location_id != target.id:
+                moved += 1
+            agent.location_id = target.id
+            agent.last_action = "spawned"
+            agent.last_move_distance_km = 0.0
+            agent.last_move_connection_type = "road"
+            agent.knowledge.visited_locations.add(target.id)
+            agent.knowledge.visit_counts[target.id] = max(
+                1, agent.knowledge.visit_counts.get(target.id, 0)
+            )
+
+        return moved
+
     @classmethod
     def from_persisted(cls, payloads: list[dict], seed: int) -> "AgentSystem":
         agents = [AutonomousAgent.from_persisted(payload) for payload in payloads]

@@ -170,6 +170,36 @@ class World:
                 added = len(self.agents.agents) - existing_count
                 if added > 0:
                     logger.info(f"Topped up {added} new agents (total: {len(self.agents.agents)})")
+
+            # If persisted placement is from a narrower historic footprint than
+            # currently available geography, redeploy agents across today's
+            # balanced spawn pool so all available countries get representation.
+            if self.agents.agents:
+                agent_loc_ids = {a.location_id for a in self.agents.agents}
+                await self.geography._warm_locations(agent_loc_ids)
+                spawn_pool = await self.geography.get_spawn_locations(
+                    types=["capital", "city", "town"],
+                    limit=max(len(self.agents.agents), 200),
+                )
+                available_countries = {
+                    (loc.admin_level_1 or "").strip()
+                    for loc in spawn_pool
+                    if (loc.admin_level_1 or "").strip()
+                }
+                current_countries = self.agents.country_coverage(self.geography)
+
+                if available_countries and current_countries:
+                    coverage_ratio = len(current_countries) / len(available_countries)
+                    if len(current_countries) < len(available_countries) and coverage_ratio < 0.8:
+                        moved = self.agents.redeploy_to_spawn_pool(spawn_pool)
+                        if moved > 0:
+                            logger.info(
+                                "Redeployed %s persisted agents across available places "
+                                "(country coverage %s/%s -> rebalanced)",
+                                moved,
+                                len(current_countries),
+                                len(available_countries),
+                            )
         else:
             # Bootstrap autonomous agents from scratch
             self.agents = await AgentSystem.bootstrap(
