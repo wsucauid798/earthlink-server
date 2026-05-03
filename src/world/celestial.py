@@ -137,25 +137,37 @@ def sub_solar_point(dt: datetime) -> tuple[float, float]:
 def earth_rotation_state(dt: datetime) -> dict:
     """Full Earth rotation state for a given UTC moment.
 
-    Returns everything a frontend needs to render the globe correctly:
-    rotation angle, sub-solar point, solar declination.
+    Returns everything a frontend needs to render the globe correctly,
+    plus globally-scoped astronomical state (moon phase, equation of time)
+    that is the same everywhere on Earth at this instant.
 
     Args:
         dt: UTC datetime
 
     Returns:
-        dict with gmst_deg, sub_solar_lat, sub_solar_lng, solar_declination_deg
+        dict with gmst_deg, sub_solar_lat, sub_solar_lng, solar_declination_deg,
+        equation_of_time_min, moon_phase, moon_illumination_pct, moon_phase_name,
+        moon_age_days
     """
     jd = julian_day_from_datetime(dt)
     gmst = greenwich_mean_sidereal_time(jd)
     ss_lat, ss_lng = sub_solar_point(dt)
     decl = degrees(solar_declination(jd))
+    eot_min = equation_of_time(jd)
+    m_phase = moon_phase(dt)
+    m_illum = moon_illumination(dt)
+    m_age = moon_age(dt)
 
     return {
         "gmst_deg": round(gmst, 4),
         "sub_solar_lat": round(ss_lat, 4),
         "sub_solar_lng": round(ss_lng, 4),
         "solar_declination_deg": round(decl, 4),
+        "equation_of_time_min": round(eot_min, 4),
+        "moon_phase": m_phase,
+        "moon_illumination_pct": m_illum,
+        "moon_phase_name": moon_phase_name(m_phase),
+        "moon_age_days": m_age,
     }
 
 
