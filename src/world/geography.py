@@ -221,6 +221,16 @@ class Geography:
                 included.extend(types)
         return tuple(included)
 
+    @staticmethod
+    def _geojson_display_type(raw_type: str, admin_level_1: str | None, zoom: float | None) -> str:
+        # Canada has many populated places encoded as generic PPL (mapped to
+        # "town"), which renders very faint at overview zooms. Promote to
+        # "city" at low zoom for better parity with other countries.
+        low_zoom = zoom is None or float(zoom) < 5.0
+        if low_zoom and raw_type == "town" and (admin_level_1 or "") == "Canada":
+            return "city"
+        return raw_type
+
     async def query_locations_geojson(
         self,
         bbox: tuple[float, float, float, float] | None = None,
@@ -260,7 +270,7 @@ class Geography:
         stmt = select(
             LocationModel.id, LocationModel.name, LocationModel.type,
             LocationModel.lat, LocationModel.lng,
-            LocationModel.population, LocationModel.admin_level_2,
+            LocationModel.population, LocationModel.admin_level_1, LocationModel.admin_level_2,
         ).where(type_filter)
 
         if bbox is not None:
@@ -277,12 +287,15 @@ class Geography:
 
         async with self._session_factory() as session:
             result = await session.execute(stmt)
+
             return [
                 {
                     "type": "Feature",
                     "geometry": {"type": "Point", "coordinates": [row.lng, row.lat]},
                     "properties": {
-                        "id": row.id, "name": row.name, "type": row.type,
+                        "id": row.id,
+                        "name": row.name,
+                        "type": self._geojson_display_type(row.type, row.admin_level_1, zoom),
                         "population": row.population or 0,
                         "admin_level_2": row.admin_level_2 or "",
                     },
