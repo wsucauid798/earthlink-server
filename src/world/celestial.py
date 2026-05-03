@@ -9,7 +9,7 @@ same algorithms used by observatories and navigation systems.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from math import (
     acos,
     asin,
@@ -399,13 +399,20 @@ def solar_position(lat: float, lng: float, dt: datetime) -> tuple[float, float]:
 _NEW_MOON_REF = datetime(2000, 1, 6, 18, 14)
 
 
+def _to_naive_utc(dt: datetime) -> datetime:
+    """Strip tz info, converting to UTC if tz-aware. Moon ref is naive UTC."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def moon_age(dt: datetime) -> float:
     """Days since the last new moon (0 = new moon, ~14.77 = full moon).
 
     Uses a simple synodic period calculation from a known new moon reference.
     Accuracy: ±0.5 days, sufficient for phase display.
     """
-    days_since_ref = (dt - _NEW_MOON_REF).total_seconds() / 86400.0
+    days_since_ref = (_to_naive_utc(dt) - _NEW_MOON_REF).total_seconds() / 86400.0
     age = days_since_ref % SYNODIC_PERIOD_DAYS
     return round(age, 2)
 
