@@ -28,6 +28,7 @@ docker compose up --build -d
 ```
 
 Services: server (port 8000), PostgreSQL (5432), Redis (6379), ChromaDB (8001).
+WebTransport QUIC world stream is exposed on UDP `4433` by default.
 
 ## Running (Local)
 
@@ -43,6 +44,8 @@ uvicorn main:app --app-dir src --reload
 ```
 
 API at `http://localhost:8000`. Interactive docs at `/docs`.
+Configure `EARTHLINK_WT_CERT_PATH` and
+`EARTHLINK_WT_KEY_PATH` to valid TLS files before startup.
 
 ## Testing
 

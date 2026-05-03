@@ -50,6 +50,7 @@ services:
     container_name: server-1
     ports:
       - "8000:8000"
+      - "4433:4433/udp"
     deploy:
       resources:
         reservations:
@@ -63,6 +64,12 @@ services:
       EARTHLINK_REDIS_URL: redis://redis:6379/0
       EARTHLINK_CHROMA_HOST: chroma
       EARTHLINK_CHROMA_PORT: 8000
+      EARTHLINK_WT_HOST: ${EARTHLINK_WT_HOST:-0.0.0.0}
+      EARTHLINK_WT_PORT: ${EARTHLINK_WT_PORT:-4433}
+      EARTHLINK_WT_PATH: ${EARTHLINK_WT_PATH:-/wt/world}
+      EARTHLINK_WT_CERT_PATH: ${EARTHLINK_WT_CERT_PATH:-/certs/dev-cert.pem}
+      EARTHLINK_WT_KEY_PATH: ${EARTHLINK_WT_KEY_PATH:-/certs/dev-key.pem}
+      EARTHLINK_WT_PUBLIC_URL: ${EARTHLINK_WT_PUBLIC_URL:-https://wt.localhost/wt/world}
     depends_on:
       db:
         condition: service_healthy
@@ -73,6 +80,7 @@ services:
     volumes:
       - app-data:/app/data
       - ./src:/app/src  # Dev: mount source for hot reload without rebuild
+      - ./certs:/certs:ro
 
 volumes:
   pgdata:

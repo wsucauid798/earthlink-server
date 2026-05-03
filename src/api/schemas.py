@@ -243,7 +243,7 @@ class SimulationConfigSchema(BaseModel):
     tick_interval_seconds: float | None = None  # Real seconds between world ticks
 
 
-# --- Tick Event (WebSocket) ---
+# --- Tick Event (World Stream / WebTransport) ---
 
 class TickEventSchema(BaseModel):
     tick: int

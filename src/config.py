@@ -28,7 +28,6 @@ class Settings(BaseSettings):
     port: int = 8000
 
     # WebTransport (QUIC/HTTP3)
-    wt_enabled: bool = False
     wt_host: str = "0.0.0.0"
     wt_port: int = 4433
     wt_path: str = "/wt/world"

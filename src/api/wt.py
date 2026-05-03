@@ -198,25 +198,21 @@ _wt_server = None
 
 
 async def start_wt_server() -> None:
-    """Start QUIC/WT listener if configured and dependencies are present."""
+    """Start QUIC/WT listener for world streaming."""
     global _wt_server
 
     if _wt_server is not None:
         return
 
-    if not settings.wt_enabled:
-        logger.info("WebTransport disabled (EARTHLINK_WT_ENABLED=0)")
-        return
-
     if not _aioquic_available:
-        logger.warning("aioquic not installed; WebTransport server not started")
-        return
+        raise RuntimeError("WebTransport startup failed: aioquic is not installed")
 
     cert_path = settings.wt_cert_path.strip()
     key_path = settings.wt_key_path.strip()
     if not cert_path or not key_path:
-        logger.warning("WT cert/key not configured; set EARTHLINK_WT_CERT_PATH and EARTHLINK_WT_KEY_PATH")
-        return
+        raise RuntimeError(
+            "WebTransport startup failed: set EARTHLINK_WT_CERT_PATH and EARTHLINK_WT_KEY_PATH"
+        )
 
     try:
         configuration = QuicConfiguration(
@@ -244,7 +240,7 @@ async def start_wt_server() -> None:
         )
     except Exception as exc:
         _wt_server = None
-        logger.exception("Failed to start WebTransport server: %s", exc)
+        raise RuntimeError(f"WebTransport startup failed: {exc}") from exc
 
 
 async def stop_wt_server() -> None:

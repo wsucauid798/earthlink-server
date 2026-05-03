@@ -54,7 +54,7 @@ async def get_version():
     return {
         "version": __version__,
         "webtransport": {
-            "enabled": settings.wt_enabled,
+            "enabled": True,
             "url": wt_url,
             "path": wt_path,
         },
