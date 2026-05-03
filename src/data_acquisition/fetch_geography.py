@@ -396,15 +396,8 @@ def parse_geonames_row(row: list[str], admin_codes: dict[str, str], country_code
     admin1 = row[10]
     admin2 = row[11]
 
-    # Resolve type.
-    # GeoNames classifies most Canadian populated places as PPL (generic
-    # populated place). If we keep PPL as "town", Canada is mostly absent
-    # from low-zoom map tiers that show only capital/city. Promote CA PPL
-    # to "city" so overview map coverage stays consistent.
-    if country_code == "CA" and feature_code == "PPL":
-        loc_type = "city"
-    else:
-        loc_type = FEATURE_CODE_TO_TYPE.get(feature_code, feature_class.lower())
+    # Resolve type
+    loc_type = FEATURE_CODE_TO_TYPE.get(feature_code, feature_class.lower())
 
     # Resolve admin hierarchy based on country
     if country_code == "GB":

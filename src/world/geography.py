@@ -222,12 +222,13 @@ class Geography:
         return tuple(included)
 
     @staticmethod
-    def _geojson_display_type(raw_type: str, admin_level_1: str | None, zoom: float | None) -> str:
-        # Canada has many populated places encoded as generic PPL (mapped to
-        # "town"), which renders very faint at overview zooms. Promote to
-        # "city" at low zoom for better parity with other countries.
+    def _geojson_display_type(raw_type: str, feature_code: str | None, zoom: float | None) -> str:
+        # Some countries encode most populated places as generic PPL, which we
+        # map to "town". At low zoom this can render too faint/small compared
+        # to capital/city-heavy regions. Promote PPL towns to "city" only for
+        # low-zoom rendering.
         low_zoom = zoom is None or float(zoom) < 5.0
-        if low_zoom and raw_type == "town" and (admin_level_1 or "") == "Canada":
+        if low_zoom and raw_type == "town" and (feature_code or "") == "PPL":
             return "city"
         return raw_type
 
@@ -254,23 +255,24 @@ class Geography:
         types = self._types_for_zoom(zoom)
         type_filter = LocationModel.type.in_(types)
 
-        # At low zoom we normally show only capital/city. GeoNames encodes most
-        # Canadian populated places as generic PPL (mapped to "town"), which
-        # makes Canada appear empty compared to other loaded regions. Include
-        # Canadian towns in this tier for consistent overview coverage.
+        # At low zoom we normally show only capital/city. For countries where
+        # populated places are mostly generic PPL (mapped to "town"), include
+        # those PPL towns in this tier so they remain visible.
         if "town" not in types:
             type_filter = or_(
                 type_filter,
                 (
                     (LocationModel.type == "town")
-                    & (LocationModel.metadata_["country_code"].astext == "CA")
+                    & (LocationModel.metadata_["feature_code"].astext == "PPL")
                 ),
             )
 
         stmt = select(
             LocationModel.id, LocationModel.name, LocationModel.type,
             LocationModel.lat, LocationModel.lng,
-            LocationModel.population, LocationModel.admin_level_1, LocationModel.admin_level_2,
+            LocationModel.population,
+            LocationModel.metadata_["feature_code"].astext.label("feature_code"),
+            LocationModel.admin_level_2,
         ).where(type_filter)
 
         if bbox is not None:
@@ -295,7 +297,7 @@ class Geography:
                     "properties": {
                         "id": row.id,
                         "name": row.name,
-                        "type": self._geojson_display_type(row.type, row.admin_level_1, zoom),
+                        "type": self._geojson_display_type(row.type, row.feature_code, zoom),
                         "population": row.population or 0,
                         "admin_level_2": row.admin_level_2 or "",
                     },

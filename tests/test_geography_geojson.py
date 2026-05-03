@@ -10,16 +10,16 @@ _SPEC.loader.exec_module(_MOD)
 Geography = _MOD.Geography
 
 
-def test_geojson_display_type_promotes_canada_town_at_low_zoom():
-    got = Geography._geojson_display_type("town", "Canada", 2)
+def test_geojson_display_type_promotes_ppl_town_at_low_zoom():
+    got = Geography._geojson_display_type("town", "PPL", 2)
     assert got == "city"
 
 
-def test_geojson_display_type_keeps_canada_town_at_higher_zoom():
-    got = Geography._geojson_display_type("town", "Canada", 6)
+def test_geojson_display_type_keeps_ppl_town_at_higher_zoom():
+    got = Geography._geojson_display_type("town", "PPL", 6)
     assert got == "town"
 
 
-def test_geojson_display_type_keeps_non_canada_town():
-    got = Geography._geojson_display_type("town", "United States", 2)
+def test_geojson_display_type_keeps_non_ppl_town():
+    got = Geography._geojson_display_type("town", "PPLA3", 2)
     assert got == "town"

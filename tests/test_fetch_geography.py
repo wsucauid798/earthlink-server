@@ -26,11 +26,11 @@ def _build_row(feature_class: str, feature_code: str) -> list[str]:
     ]
 
 
-def test_parse_geonames_row_ca_ppl_promoted_to_city():
+def test_parse_geonames_row_ca_ppl_is_town():
     row = _build_row("P", "PPL")
     loc = parse_geonames_row(row, admin_codes={}, country_code="CA")
     assert loc is not None
-    assert loc["type"] == "city"
+    assert loc["type"] == "town"
 
 
 def test_parse_geonames_row_non_ca_ppl_remains_town():
@@ -38,4 +38,3 @@ def test_parse_geonames_row_non_ca_ppl_remains_town():
     loc = parse_geonames_row(row, admin_codes={}, country_code="US")
     assert loc is not None
     assert loc["type"] == "town"
-
