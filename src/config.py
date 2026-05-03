@@ -27,6 +27,17 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # WebTransport (QUIC/HTTP3)
+    wt_enabled: bool = False
+    wt_host: str = "0.0.0.0"
+    wt_port: int = 4433
+    wt_path: str = "/wt/world"
+    wt_cert_path: str = ""
+    wt_key_path: str = ""
+    # Optional externally reachable WT URL (for reverse proxy / separate hostname).
+    # Example: "https://earthlink.yuxilabs.com/wt/world" or "https://wt.earthlink.yuxilabs.com/wt/world"
+    wt_public_url: str = ""
+
     # World — overridable via EARTHLINK_AGENT_COUNT etc.
     # Sequential mode threshold is RAY_MIN_AGENTS=500 (in agents/system.py);
     # values <500 keep sequential tick path, >=500 enable Ray actors.

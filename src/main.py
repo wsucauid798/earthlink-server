@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router as api_router, set_world
-from api.ws import router as ws_router, on_tick
+from api.wt import on_tick_wt, start_wt_server, stop_wt_server
 from db.engine import dispose_engine, engine, async_session
 from db.models import Base
 from world import World
@@ -44,10 +44,11 @@ async def lifespan(app: FastAPI):
 
     world = World(WorldConfig(agent_count=settings.agent_count))
     await world.load()
-    world.on_tick(on_tick)
+    world.on_tick(on_tick_wt)
     set_world(world)
     if not world.is_running:
         await world.start()
+    await start_wt_server()
 
     logger.info("EarthLink server ready")
 
@@ -56,6 +57,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if world.is_running:
         await world.pause()
+    await stop_wt_server()
     if world.earth_proxy:
         await world.earth_proxy.disconnect_redis()
     # Shut down Ray if it was initialised
@@ -85,4 +87,3 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api")
-app.include_router(ws_router)

@@ -1,6 +1,7 @@
 """REST API routes for the EarthLink world server."""
 
 from fastapi import APIRouter, HTTPException, Query
+from config import settings
 
 from api.schemas import (
     AgentAnswerSchema,
@@ -46,7 +47,18 @@ def get_world() -> World:
 async def get_version():
     """Return the server version."""
     from world import __version__
-    return {"version": __version__}
+    wt_path = settings.wt_path.strip() or "/wt/world"
+    if not wt_path.startswith("/"):
+        wt_path = f"/{wt_path}"
+    wt_url = settings.wt_public_url.strip() or None
+    return {
+        "version": __version__,
+        "webtransport": {
+            "enabled": settings.wt_enabled,
+            "url": wt_url,
+            "path": wt_path,
+        },
+    }
 
 
 # --- World State ---
