@@ -4,7 +4,7 @@ import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from db.models import Location as LocationModel
@@ -242,11 +242,26 @@ class Geography:
         initial load.
         """
         types = self._types_for_zoom(zoom)
+        type_filter = LocationModel.type.in_(types)
+
+        # At low zoom we normally show only capital/city. GeoNames encodes most
+        # Canadian populated places as generic PPL (mapped to "town"), which
+        # makes Canada appear empty compared to other loaded regions. Include
+        # Canadian towns in this tier for consistent overview coverage.
+        if "town" not in types:
+            type_filter = or_(
+                type_filter,
+                (
+                    (LocationModel.type == "town")
+                    & (LocationModel.metadata_["country_code"].astext == "CA")
+                ),
+            )
+
         stmt = select(
             LocationModel.id, LocationModel.name, LocationModel.type,
             LocationModel.lat, LocationModel.lng,
             LocationModel.population, LocationModel.admin_level_2,
-        ).where(LocationModel.type.in_(types))
+        ).where(type_filter)
 
         if bbox is not None:
             west, south, east, north = bbox
