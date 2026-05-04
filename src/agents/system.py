@@ -255,8 +255,16 @@ class AutonomousAgent:
     last_move_distance_km: float = 0.0
     last_move_connection_type: str = "road"
     last_action: str = "spawned"
-    # Locomotion
+    # Locomotion — multi-tick travel state.
+    # Decisions happen at tick boundaries, but a journey takes wall-time
+    # proportional to distance / speed. Client interpolates the on-map
+    # position between (travel_from_id) and (traveling_to_id) using the
+    # depart timestamp and total duration.
     speed_kmh: float = 5.0  # base walking speed (km/h), affects energy cost
+    traveling_to_id: int | None = None
+    travel_from_id: int | None = None
+    travel_total_ticks: int = 0      # total ticks the journey spans
+    travel_remaining_ticks: int = 0  # ticks left until arrival
     last_reward: float = 0.0
     current_goal: AgentGoal | None = None
     goal_age_ticks: int = 0
@@ -367,7 +375,31 @@ class AutonomousAgent:
         terrain_mod = self._terrain_energy_modifier(connection_type)
         return distance_km * terrain_mod
 
+    @property
+    def is_traveling(self) -> bool:
+        return self.traveling_to_id is not None and self.travel_remaining_ticks > 0
+
+    # Terrain modifier on travel speed (matches energy-cost ordering elsewhere).
+    _TERRAIN_SPEED_MULT = {
+        "road": 1.0, "rail": 1.4, "path": 0.6,
+        "proximity": 0.5, "waterway": 0.3,
+    }
+
     def apply_action(self, new_location_id: int, geography: Geography, tick_interval_seconds: float = 1.0) -> None:
+        # If already traveling, advance the journey — don't reroute mid-flight.
+        if self.is_traveling:
+            self.travel_remaining_ticks -= 1
+            if self.travel_remaining_ticks <= 0:
+                # Arrived: finalize the move.
+                self.location_id = self.traveling_to_id  # type: ignore[assignment]
+                self.travel_from_id = None
+                self.traveling_to_id = None
+                self.travel_total_ticks = 0
+                self.last_action = "arrive"
+            else:
+                self.last_action = "travel"
+            return
+
         if new_location_id == self.location_id:
             # Staying at current location — still exploring it (deeper observation)
             self.last_action = "explore"
@@ -375,7 +407,7 @@ class AutonomousAgent:
             self.last_move_connection_type = "road"
             return
 
-        # Move to new location — pay energy proportional to distance and terrain
+        # Decide to travel: look up the connection to compute travel duration.
         distance_km = 0.0
         connection_type = "proximity"
         for location, connection in geography.get_nearby_locations(self.location_id):
@@ -384,10 +416,36 @@ class AutonomousAgent:
                 connection_type = connection.connection_type
                 break
 
-        self.location_id = new_location_id
         self.last_move_distance_km = distance_km
         self.last_move_connection_type = connection_type
-        self.last_action = "explore"
+
+        # Compute travel duration in ticks. A neighbour at 10 km on a road
+        # for an agent at 5 km/h takes 2 hours = 7200 wall-seconds, so at
+        # tick_interval=1 s that's 7200 ticks — far too slow. Scale the
+        # tick model: 1 tick == 1 simulated minute (configurable later).
+        # For now keep it visible: 1 tick == 1 simulated minute means the
+        # 10 km road trip at 5 km/h walking = 120 ticks; at 50 km/h drive
+        # speed = 12 ticks.
+        SIM_MINUTES_PER_TICK = 1.0
+        speed_mult = self._TERRAIN_SPEED_MULT.get(connection_type, 1.0)
+        effective_speed_kmh = max(0.5, self.speed_kmh * speed_mult)
+        # hours = distance / speed; ticks = hours * 60 / SIM_MIN_PER_TICK
+        ticks = max(1, int(round(distance_km / effective_speed_kmh * 60.0 / SIM_MINUTES_PER_TICK)))
+
+        # Single-tick journeys: skip travel state, just arrive.
+        if ticks <= 1:
+            self.location_id = new_location_id
+            self.last_action = "explore"
+            return
+
+        # Multi-tick journey: stay at origin (location_id unchanged) and
+        # mark the in-flight state. The visual layer interpolates between
+        # travel_from_id and traveling_to_id over `travel_total_ticks`.
+        self.travel_from_id = self.location_id
+        self.traveling_to_id = new_location_id
+        self.travel_total_ticks = ticks
+        self.travel_remaining_ticks = ticks
+        self.last_action = "depart"
 
     def learn(self, next_observation: AgentObservation, tick_count: int | None = None) -> None:
         self._ingest_observation(next_observation, tick_count=tick_count)
@@ -1624,6 +1682,29 @@ class AgentSystem:
                 q_value = agent.knowledge.q_values.get(agent._last_state_id, {}).get(agent._last_action_id, 0.0)
 
             loc = geography.get_location(agent.location_id)
+            # Multi-tick travel state — emitted so the client can interpolate
+            # the agent's on-map position smoothly between origin and
+            # destination across the journey's duration.
+            travel = None
+            if agent.is_traveling and agent.traveling_to_id is not None:
+                from_loc = (
+                    geography.get_location(agent.travel_from_id)
+                    if agent.travel_from_id is not None
+                    else None
+                )
+                to_loc = geography.get_location(agent.traveling_to_id)
+                if from_loc and to_loc:
+                    travel = {
+                        "from_id": agent.travel_from_id,
+                        "to_id": agent.traveling_to_id,
+                        "from_lat": from_loc.lat,
+                        "from_lng": from_loc.lng,
+                        "to_lat": to_loc.lat,
+                        "to_lng": to_loc.lng,
+                        "total_ticks": agent.travel_total_ticks,
+                        "remaining_ticks": agent.travel_remaining_ticks,
+                    }
+
             events.append(
                 {
                     "agent_id": agent.agent_id,
@@ -1645,6 +1726,8 @@ class AgentSystem:
                     # Move: where and how far
                     "moved": previous_location != agent.location_id,
                     "distance_km": round(agent.last_move_distance_km, 2),
+                    # Multi-tick travel (None when stationary or just arrived)
+                    "travel": travel,
                     # Communicate: handled in social_learn, logged separately
                     # Energy
                     "energy": round(agent.energy, 1),
