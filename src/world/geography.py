@@ -211,6 +211,16 @@ class Geography:
         (12, ("settlement",)),
     ]
 
+    # Hard ceiling on features returned by query_locations_geojson. Without a
+    # bbox the query covers the entire globe and at a populated DB the
+    # capital/city tier alone can be tens of thousands of rows, producing a
+    # >10 MB GeoJSON payload that OOMs WebView-based clients. Cap aggressively
+    # for the global overview; cap less aggressively (defence in depth) when a
+    # viewport bbox is provided. Top N by population so the cap preserves the
+    # most useful features.
+    _GEOJSON_MAX_FEATURES_GLOBAL = 2_000
+    _GEOJSON_MAX_FEATURES_BBOX = 20_000
+
     @classmethod
     def _types_for_zoom(cls, zoom: float | None) -> tuple[str, ...]:
         """Return the location types to include for a given zoom level."""
@@ -249,8 +259,9 @@ class Geography:
 
         Volume is managed at the right layer (viewport + zoom from the client),
         not by a hardcoded population threshold. Default (no params) returns
-        the global overview tier (capital + city) — small enough for a fast
-        initial load.
+        the global overview tier (capital + city), and a hard ceiling
+        (top-N by population) caps the response so WebView clients never see
+        a multi-MB GeoJSON. See _GEOJSON_MAX_FEATURES_GLOBAL / _BBOX.
         """
         types = self._types_for_zoom(zoom)
         type_filter = LocationModel.type.in_(types)
@@ -286,6 +297,15 @@ class Geography:
                 LocationModel.lng >= west,
                 LocationModel.lng <= east,
             )
+            max_features = self._GEOJSON_MAX_FEATURES_BBOX
+        else:
+            max_features = self._GEOJSON_MAX_FEATURES_GLOBAL
+
+        # Order by population desc so the cap keeps the highest-signal places.
+        # NULL populations sort last under SQLAlchemy's nulls_last().
+        stmt = stmt.order_by(
+            LocationModel.population.desc().nulls_last(),
+        ).limit(max_features)
 
         async with self._session_factory() as session:
             result = await session.execute(stmt)
