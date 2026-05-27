@@ -15,6 +15,15 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 
+# pgvector — vector column type for embedding storage / similarity search.
+# Imported lazily-safe: the package is in requirements; if missing, the
+# import will fail loudly at startup rather than silently falling back.
+from pgvector.sqlalchemy import Vector
+
+# Must match the dimension pinned in migration c5e7a09f8b21 and the
+# embedding model selected in S71 (BAAI/bge-m3).
+EMBEDDING_DIMS = 1024
+
 
 class Base(DeclarativeBase):
     pass
@@ -166,3 +175,25 @@ class AgentState(Base):
     comfort_temperature_c = Column(Float, nullable=False)
 
     knowledge = Column(JSONB, nullable=False, default=dict)
+
+
+class AgentFact(Base):
+    """Per-agent semantic memory backed by pgvector.
+
+    One row per fact the agent has learned. Embedding is computed at write
+    time via the TEI service (S71: BAAI/bge-m3, 1024 dims). Read path uses
+    cosine similarity on the HNSW index (see migration c5e7a09f8b21).
+
+    Replaces the per-agent ChromaDB collections used by ChromaFactStore
+    once the migration in S77 lands.
+    """
+    __tablename__ = "agent_facts"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    agent_id = Column(String(255), nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    embedding = Column(Vector(EMBEDDING_DIMS), nullable=False)
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="SET NULL"), nullable=True)
+    tick_count = Column(Integer, nullable=True)
+    fact_metadata = Column("metadata", JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)

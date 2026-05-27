@@ -22,16 +22,33 @@ async def lifespan(app: FastAPI):
     # Startup: ensure tables exist, load and start the world
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
+    # Alembic FIRST — must run before create_all because some columns
+    # (e.g. agent_facts.embedding = vector(1024)) depend on the pgvector
+    # extension being installed, which is done by migration c5e7a09f8b21.
+    # Retries handle the brief window when Postgres is up but not ready.
     for attempt in range(1, 6):
         try:
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+            from alembic.config import Config as _AlembicConfig
+            from alembic import command as _alembic_command
+            cfg = _AlembicConfig("/app/alembic.ini")
+            cfg.set_main_option("script_location", "/app/src/db/migrations")
+            # Override the hard-coded URL in alembic.ini with the actual
+            # runtime DB URL from settings (in-container DNS, prod creds).
+            cfg.set_main_option("sqlalchemy.url", settings.database_url)
+            await asyncio.to_thread(_alembic_command.upgrade, cfg, "head")
+            logger.info("alembic migrations: at head")
             break
         except Exception as exc:
             if attempt == 5:
                 raise
-            logger.warning("Database not ready (%s), retrying in %ds...", exc, attempt * 2)
+            logger.warning("alembic upgrade failed (%s), retrying in %ds...", exc, attempt * 2)
             await asyncio.sleep(attempt * 2)
+
+    # create_all is the safety net for any model that isn't covered by an
+    # alembic migration (e.g. dev-only tables, or one defined before its
+    # migration is written). Idempotent — only creates missing tables.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
     # Auto-seed geography. `seed_geography()` (run) is internally idempotent:
     # it queries which countries are already present (via metadata->>'country_code'
