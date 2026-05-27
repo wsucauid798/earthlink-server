@@ -305,11 +305,19 @@ class World:
         # Earth rotation state for frontend globe rendering
         from world.celestial import earth_rotation_state
         rotation = earth_rotation_state(self.time.current_time.replace(tzinfo=None))
+        orbital = self.orbital.compute(self.time.current_time).to_dict()
+        solar_activity = (
+            self.data_feeds.solar_activity.to_dict()
+            if self.data_feeds and self.data_feeds.solar_activity
+            else None
+        )
 
         tick_data = {
             "tick": self.time.tick_count,
             "time": self.time.to_dict(),
             "rotation": rotation,
+            "orbital": orbital,
+            "solar_activity": solar_activity,
             "weather_updated": "weather" in refreshed,
             "wind_updated": "wind" in refreshed,
             "atmosphere_updated": "atmosphere" in refreshed,

@@ -248,6 +248,9 @@ class SimulationConfigSchema(BaseModel):
 class TickEventSchema(BaseModel):
     tick: int
     time: TimeSchema
+    rotation: dict
+    orbital: dict | None = None
+    solar_activity: dict | None = None
     weather_updated: bool
     wind_updated: bool
     atmosphere_updated: bool

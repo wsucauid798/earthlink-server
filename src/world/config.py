@@ -24,7 +24,7 @@ class RefreshPolicies(BaseModel):
     astronomy: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=1440)  # daily
     atmosphere: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=30)
     geography: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=10080)  # weekly
-    data_feeds: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=30)
+    data_feeds: RefreshPolicy = RefreshPolicy(enabled=True, interval_minutes=1)
 
 
 class FallbackBehavior(str, Enum):

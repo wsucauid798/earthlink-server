@@ -552,11 +552,10 @@ async def get_rotation():
     directly overhead), and solar declination. Everything a frontend
     needs to render globe rotation and day/night terminator.
     """
-    from datetime import datetime, timezone
     from world.celestial import earth_rotation_state
 
-    now = datetime.now(timezone.utc)
-    return earth_rotation_state(now)
+    world = get_world()
+    return earth_rotation_state(world.time.current_time.replace(tzinfo=None))
 
 
 # --- Evaluation Snapshot ---
