@@ -116,6 +116,12 @@ class EarthProxy:
             await self._redis.aclose()
             self._redis = None
 
+    @property
+    def redis(self):
+        """The shared async Redis client (or None when unavailable). Reused by
+        the WT broadcast fan-out (S90) so it doesn't open a second connection."""
+        return self._redis
+
     def register_adapter(self, adapter: EarthAdapter) -> None:
         """Register an Earth data source adapter."""
         self.adapters.append(adapter)
@@ -466,17 +472,35 @@ class EarthProxy:
 
     async def _set_facts(self, key: str, facts: list[EarthFact]) -> None:
         """Store facts in Redis with TTL (or fallback)."""
+        import time
         if self._redis:
             try:
                 serialised = json.dumps([f.to_dict() for f in facts], default=str)
                 await self._redis.set(key, serialised, ex=self.ttl_seconds)
+                # S80/S89: announce the resolved facts on a stream so the
+                # embed worker can index them into the world semantic layer
+                # off the resolution path. Fire-and-forget, never blocks.
+                await self._publish_resolved(key, time.time() + self.ttl_seconds)
                 return
             except Exception as e:
                 logger.warning(f"Redis SET failed for {key}: {e}")
 
         # Fallback: in-memory
-        import time
         self._fallback_entries[key] = (list(facts), time.time())
+
+    async def _publish_resolved(self, key: str, expires_at: float) -> None:
+        """Publish a resolved-fact event to the embed-pipeline stream (S89)."""
+        if not self._redis:
+            return
+        try:
+            await self._redis.xadd(
+                "earthlink:stream:resolved-facts",
+                {"key": key, "expires_at": str(expires_at)},
+                maxlen=10000,
+                approximate=True,
+            )
+        except Exception as e:
+            logger.debug(f"resolved-facts xadd failed for {key}: {e}")
 
     async def _has_key(self, key: str) -> bool:
         """Check if a key exists and hasn't expired."""

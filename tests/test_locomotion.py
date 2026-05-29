@@ -20,10 +20,10 @@ def build_geography():
     }
     c12 = ConnectionData(1, 2, 1.0, "road", None, None)
     c23 = ConnectionData(2, 3, 5.0, "path", None, None)
-    return Geography(
+    return Geography.from_memory(
         locations=locations,
         connections=[c12, c23],
-        _adjacency={1: [c12], 2: [c12, c23], 3: [c23]},
+        adjacency={1: [c12], 2: [c12, c23], 3: [c23]},
     )
 
 

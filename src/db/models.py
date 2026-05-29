@@ -184,8 +184,9 @@ class AgentFact(Base):
     time via the TEI service (S71: BAAI/bge-m3, 1024 dims). Read path uses
     cosine similarity on the HNSW index (see migration c5e7a09f8b21).
 
-    Replaces the per-agent ChromaDB collections used by ChromaFactStore
-    once the migration in S77 lands.
+    Replaces the per-agent ChromaDB collections used by ChromaFactStore;
+    the read/write cutover landed in S76/S77 and the historical facts are
+    migrated across by the S78 backfill (agents/backfill.py).
     """
     __tablename__ = "agent_facts"
 

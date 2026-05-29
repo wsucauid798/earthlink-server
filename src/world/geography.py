@@ -94,12 +94,50 @@ class Geography:
     as agents approach, not by cramming everything in at once.
     """
 
-    def __init__(self, session_factory: async_sessionmaker):
+    def __init__(self, session_factory: async_sessionmaker | None):
         self._session_factory = session_factory
         self._loc_cache = _LRUCache(max_size=20_000)
         self._conn_cache = _LRUCache(max_size=10_000)
         self._location_count: int | None = None
         self._connection_count: int | None = None
+
+    @classmethod
+    def from_memory(
+        cls,
+        locations: dict[int, LocationData] | list[LocationData],
+        connections: list[ConnectionData] | None = None,
+        adjacency: dict[int, list[ConnectionData]] | None = None,
+    ) -> "Geography":
+        """Build a Geography backed entirely by in-memory data — no database.
+
+        For tests and offline scenarios. ``locations`` is an id→LocationData map
+        (or an iterable of LocationData); ``connections`` is a flat list. The
+        per-location adjacency is derived from ``connections`` (each connection
+        attached to both endpoints) unless given explicitly. The sync read API
+        (``get_location`` / ``get_neighbours`` / ``get_nearby_locations``) then
+        serves straight from the pre-warmed caches; the async/DB methods are
+        unused (``session_factory`` is ``None``).
+        """
+        connections = list(connections or [])
+        loc_map = (
+            dict(locations)
+            if isinstance(locations, dict)
+            else {loc.id: loc for loc in locations}
+        )
+        if adjacency is None:
+            adjacency = {}
+            for conn in connections:
+                adjacency.setdefault(conn.from_id, []).append(conn)
+                adjacency.setdefault(conn.to_id, []).append(conn)
+
+        geo = cls(session_factory=None)
+        for loc_id, loc in loc_map.items():
+            geo._loc_cache.put(loc_id, loc)
+        for loc_id, conns in adjacency.items():
+            geo._conn_cache.put(loc_id, conns)
+        geo._location_count = len(loc_map)
+        geo._connection_count = len(connections)
+        return geo
 
     @property
     def location_count(self) -> int:

@@ -1,6 +1,10 @@
 services:
   db:
-    image: postgres:17
+    # pgvector/pgvector:pg17 = stock PG 17 + the vector extension preinstalled,
+    # required by migration c5e7a09f8b21 (CREATE EXTENSION vector). Data layout
+    # is wire-compatible with postgres:17, so the existing pgdata volume is
+    # reused without reinit (matches prod, S73).
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: earthlink
       POSTGRES_PASSWORD: earthlink
@@ -44,6 +48,20 @@ services:
       timeout: 5s
       retries: 5
 
+  # TEI — Text Embeddings Inference (S72). Single embedding service:
+  # serves BAAI/bge-m3 (1024 dims, S71). CPU image — no GPU on the VPS.
+  # First boot downloads the model (~2.3 GB) into the cache volume; the
+  # server falls back to token-overlap ranking until TEI is ready.
+  tei:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.5
+    command: ["--model-id", "BAAI/bge-m3", "--auto-truncate"]
+    ports:
+      - "8080:80"
+    volumes:
+      - teidata:/data
+    environment:
+      HUGGINGFACE_HUB_CACHE: /data
+
   server:
     image: earthlink-server
     build: .
@@ -64,6 +82,9 @@ services:
       EARTHLINK_REDIS_URL: redis://redis:6379/0
       EARTHLINK_CHROMA_HOST: chroma
       EARTHLINK_CHROMA_PORT: 8000
+      # Pgvector cutover (S99) — mirror prod: legacy per-agent Chroma path off.
+      EARTHLINK_CHROMA_ENABLED: "false"
+      EARTHLINK_TEI_URL: http://tei:80
       EARTHLINK_WT_HOST: ${EARTHLINK_WT_HOST:-0.0.0.0}
       EARTHLINK_WT_PORT: ${EARTHLINK_WT_PORT:-4433}
       EARTHLINK_WT_PATH: ${EARTHLINK_WT_PATH:-/wt/world}
@@ -76,7 +97,9 @@ services:
       redis:
         condition: service_healthy
       chroma:
-        condition: service_healthy
+        condition: service_started  # S99: Chroma off the per-agent path — don't gate startup on it
+      tei:
+        condition: service_started
     volumes:
       - app-data:/app/data
       - ./src:/app/src  # Dev: mount source for hot reload without rebuild
@@ -86,4 +109,5 @@ volumes:
   pgdata:
   redisdata:
   chromadata:
+  teidata:
   app-data:

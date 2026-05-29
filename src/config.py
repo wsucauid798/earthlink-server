@@ -22,6 +22,24 @@ class Settings(BaseSettings):
     # Chroma (vector DB — agent semantic memory retrieval)
     chroma_host: str = "localhost"
     chroma_port: int = 8001
+    # Pgvector cutover switch (S99). Default OFF: the legacy per-agent
+    # ChromaFactStore is retired (S78) and agent memory lives in pgvector
+    # (S76/S77), so Chroma must stay out of the per-agent tick path — a wedged
+    # Chroma there is what stalled ticks (S66). Defaulting false means the
+    # image is safe even where the env var isn't set. Chroma keeps running for
+    # its world-semantic-layer role (S79+), just not per-agent. Set true only
+    # to temporarily resurrect the legacy per-agent path.
+    chroma_enabled: bool = False
+
+    # TEI (Text Embeddings Inference — the single embedding service, S72).
+    # Serves BAAI/bge-m3 at 1024 dims (S71). All embedding routes through it;
+    # callers degrade gracefully when it is unreachable.
+    tei_url: str = "http://localhost:8080"
+    tei_embedding_dims: int = 1024  # MUST match db.models.EMBEDDING_DIMS (S71)
+    # World semantic layer (S79-S82): Chroma's new role — a shared, TTL'd
+    # index over EarthProxy-resolved civilisation content. Independent of the
+    # (retired) per-agent chroma path; async + off the tick thread.
+    world_semantic_enabled: bool = True
 
     # Server
     host: str = "0.0.0.0"
@@ -38,8 +56,9 @@ class Settings(BaseSettings):
     wt_public_url: str = ""
 
     # World — overridable via EARTHLINK_AGENT_COUNT etc.
-    # Sequential mode threshold is RAY_MIN_AGENTS=500 (in agents/system.py);
-    # values <500 keep sequential tick path, >=500 enable Ray actors.
+    # Ray is gated by RAY_MIN_AGENTS=10000 (agents/system.py, raised in S94):
+    # on a single VPS the sequential + asyncio.to_thread path (S65) handles
+    # 1000+ agents, while 1000 Ray actors (~150-250 MB each) would OOM.
     agent_count: int = 300
 
     model_config = {"env_prefix": "EARTHLINK_"}

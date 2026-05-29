@@ -107,7 +107,7 @@ async def list_agents(
 async def get_agent(agent_id: str):
     """Get detailed state and learned knowledge for an autonomous agent."""
     world = get_world()
-    agent = world.get_agent(agent_id)
+    agent = await world.get_agent_async(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent
@@ -117,10 +117,24 @@ async def get_agent(agent_id: str):
 async def ask_agent(agent_id: str, question: str = Query(..., min_length=1, description="Question to ask the agent")):
     """Ask an agent a direct question and receive a memory-grounded answer."""
     world = get_world()
-    answer = world.ask_agent(agent_id, question)
+    answer = await world.ask_agent_async(agent_id, question)
     if not answer:
         raise HTTPException(status_code=404, detail="Agent not found")
     return answer
+
+
+@router.get("/world/semantic")
+async def world_semantic_search(
+    q: str = Query(..., min_length=1, description="Semantic query over live civilisation content"),
+    location_id: int | None = Query(None, description="Restrict to a location"),
+    domain: str | None = Query(None, description="Restrict to a domain (history/news/institution/...)"),
+    top_k: int = Query(5, ge=1, le=50),
+):
+    """World semantic layer (S81): search recently-resolved civilisation
+    content by meaning, optionally scoped to a location or domain."""
+    world = get_world()
+    results = await world.query_world_semantic(q, top_k=top_k, location_id=location_id, domain=domain)
+    return {"query": q, "location_id": location_id, "domain": domain, "results": results}
 
 
 # --- Locations ---

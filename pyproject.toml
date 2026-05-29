@@ -17,7 +17,6 @@ dependencies = [
     "redis>=5.0.0",
     "chromadb-client>=1.0.0",
     "ray>=2.40.0",
-    "sentence-transformers>=3.0.0",
     "numpy>=1.26.0",
     "tzdata>=2024.1",
     "timezonefinder>=6.0.0",

@@ -1,8 +1,8 @@
 """Semantic retrieval over agent fact memory.
 
 Uses ChromaDB when available (proper vector database with persistent
-embeddings). Falls back to sentence-transformers in-process, then to
-lightweight token-overlap scoring.
+embeddings). Falls back to the TEI embedding service (S72), then to
+lightweight token-overlap scoring when TEI is also unreachable.
 
 Chroma is the right tool for this: embeddings are computed once when
 facts are stored, and queries are fast similarity searches — not
@@ -21,6 +21,8 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Callable, Iterable, TypeVar
+
+from .embeddings import TEIEmbedder, get_embedder
 
 logger = logging.getLogger(__name__)
 
@@ -147,42 +149,61 @@ class ChromaFactStore:
         return _chroma_call(lambda: collection.count(), default=0, op="count")
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity. TEI returns L2-normalized vectors (normalize=True),
+    so the dot product already is the cosine similarity."""
+    return sum(x * y for x, y in zip(a, b))
+
+
 class SemanticFactRetriever:
     """Ranks fact strings by relevance to a query.
 
-    Uses sentence-transformers embeddings when available, otherwise falls back
-    to lightweight token-overlap scoring. This is the in-process fallback
-    when Chroma is not available.
+    Embeddings come from the TEI service (S72: BAAI/bge-m3). When TEI is
+    unreachable, falls back to lightweight token-overlap scoring. No
+    in-process embedding model is loaded — S72 retired the previous
+    sentence-transformers path, which cost ~150-250 MB of PyTorch per
+    process and duplicated the network embedding service.
+
+    This is the fallback retriever used when Chroma is not available.
     """
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self.backend = "token-overlap"
-        self._model = None
-        self._np = None
-
-        try:
-            import numpy as np
-            from sentence_transformers import SentenceTransformer
-
-            self._np = np
-            self._model = SentenceTransformer(model_name)
-            self.backend = "sentence-transformers"
-        except Exception:
-            self.backend = "token-overlap"
+    def __init__(self, embedder: TEIEmbedder | None = None):
+        self._embedder = embedder if embedder is not None else get_embedder()
+        # Reflects the path the most recent rank() call actually took.
+        self.backend = "tei"
 
     def rank(self, query: str, facts: Iterable[str], top_k: int = 5) -> list[tuple[float, int, str]]:
         fact_list = [fact for fact in facts if fact and fact.strip()]
         if not fact_list:
             return []
 
-        if self.backend == "sentence-transformers" and self._model is not None and self._np is not None:
-            query_embedding = self._model.encode([query], normalize_embeddings=True)
-            fact_embeddings = self._model.encode(fact_list, normalize_embeddings=True)
-            scores = (fact_embeddings @ query_embedding[0]).tolist()
-            indexed = [(score, idx, text) for idx, (score, text) in enumerate(zip(scores, fact_list))]
-            ranked = sorted(indexed, key=lambda item: item[0], reverse=True)
-            return ranked[:top_k]
+        ranked = self._rank_with_tei(query, fact_list, top_k)
+        if ranked is not None:
+            self.backend = "tei"
+            return ranked
 
+        self.backend = "token-overlap"
+        return self._rank_with_overlap(query, fact_list, top_k)
+
+    def _rank_with_tei(
+        self, query: str, fact_list: list[str], top_k: int
+    ) -> list[tuple[float, int, str]] | None:
+        """Embed query + facts via TEI and rank by cosine. Returns None if
+        TEI is unavailable so the caller can fall back."""
+        vectors = self._embedder.embed([query, *fact_list])
+        if not vectors or len(vectors) != len(fact_list) + 1:
+            return None
+        q_vec = vectors[0]
+        ranked = [
+            (_cosine(q_vec, vec), idx, text)
+            for idx, (vec, text) in enumerate(zip(vectors[1:], fact_list))
+        ]
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[:top_k]
+
+    def _rank_with_overlap(
+        self, query: str, fact_list: list[str], top_k: int
+    ) -> list[tuple[float, int, str]]:
         q_tokens = self._tokenize(query)
         ranked: list[tuple[float, int, str]] = []
         for idx, fact in enumerate(fact_list):

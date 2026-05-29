@@ -4,6 +4,7 @@ Tests both the Ray actor path and verifies that sequential fallback
 produces identical behaviour when Ray is not available.
 """
 
+import math
 import pytest
 import random
 from datetime import datetime, timezone
@@ -15,8 +16,17 @@ from agents.system import (
     AgentKnowledge,
     AgentObservation,
 )
-from world.geography import LocationData, Geography
+from world.geography import ConnectionData, LocationData, Geography
 from world.weather import Weather, WeatherState
+
+
+def _haversine_km(a: LocationData, b: LocationData) -> float:
+    radius = 6371.0
+    lat1, lat2 = math.radians(a.lat), math.radians(b.lat)
+    dlat = math.radians(b.lat - a.lat)
+    dlng = math.radians(b.lng - a.lng)
+    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
+    return 2 * radius * math.asin(math.sqrt(h))
 
 
 # ---------------------------------------------------------------------------
@@ -64,12 +74,22 @@ def _make_geography() -> Geography:
             population=520000, metadata=None,
         ),
     }
-    connections = {
+    neighbour_ids = {
         1: [2, 3],
         2: [1, 3],
         3: [1, 2],
     }
-    return Geography(locations=locations, connections=connections)
+    connections: list[ConnectionData] = []
+    seen: set[tuple[int, int]] = set()
+    for src, neighbours in neighbour_ids.items():
+        for dst in neighbours:
+            key = (min(src, dst), max(src, dst))
+            if key in seen:
+                continue
+            seen.add(key)
+            distance = round(_haversine_km(locations[src], locations[dst]), 2)
+            connections.append(ConnectionData(src, dst, distance, "road", None, None))
+    return Geography.from_memory(locations=locations, connections=connections)
 
 
 def _make_agents(n: int = 3, seed: int = 42) -> list[AutonomousAgent]:

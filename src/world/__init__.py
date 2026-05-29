@@ -60,6 +60,9 @@ class World:
         self._tick_callbacks: list = []
         self._refreshed_domains: set[str] = set()  # domains refreshed since last tick
         self._resolve_task: asyncio.Task | None = None  # background location resolution
+        self._world_store = None          # S79: world semantic layer (Chroma)
+        self._embed_worker = None         # S89: resolved-fact embed worker
+        self._embed_task: asyncio.Task | None = None
 
     @property
     def is_running(self) -> bool:
@@ -250,6 +253,29 @@ class World:
             f"({enabled_count} enabled), backend={backend}"
         )
 
+        # World semantic layer (S79-S82) + embed pipeline (S80/S89). Chroma's
+        # new job: a shared, TTL'd index over resolved civilisation content.
+        # All async, off the tick thread, degrades if Chroma/TEI/Redis are down.
+        try:
+            from config import settings
+            if settings.world_semantic_enabled:
+                from .semantic import get_world_semantic_store
+                from .embed_worker import EmbedWorker
+
+                self._world_store = get_world_semantic_store(
+                    settings.chroma_host, settings.chroma_port
+                )
+                await self._world_store.connect()
+                self._embed_worker = EmbedWorker(
+                    self.earth_proxy._redis, self.earth_proxy, self._world_store
+                )
+                self._embed_task = asyncio.create_task(self._embed_worker.run())
+                logger.info(
+                    "World semantic layer ready (available=%s)", self._world_store.available
+                )
+        except Exception as e:
+            logger.warning(f"World semantic layer not started: {e}")
+
     async def tick(self) -> dict:
         """
         Advance the world by one step.
@@ -383,6 +409,16 @@ class World:
             except asyncio.CancelledError:
                 pass
             self._resolve_task = None
+        # Stop the embed worker (S89)
+        if self._embed_worker:
+            self._embed_worker.stop()
+        if self._embed_task and not self._embed_task.done():
+            self._embed_task.cancel()
+            try:
+                await self._embed_task
+            except asyncio.CancelledError:
+                pass
+            self._embed_task = None
         # Cancel all refresh schedulers
         for domain, task in self._refresh_tasks.items():
             task.cancel()
@@ -544,6 +580,36 @@ class World:
         logger.info(f"LOD: resolving {len(unresolved)} locations (max concurrent={self.config.max_concurrent_locations})")
         await asyncio.gather(*(_safe_resolve(loc_id) for loc_id in unresolved))
 
+        # S82: let agents consult the world semantic layer for the places they
+        # are at, and commit relevant content to their own memory. Bounded per
+        # cycle; off the tick thread. Indexing lags resolution (S89), so this
+        # picks up content resolved on prior cycles — it converges over ticks.
+        await self._consult_world_for_agents(agent_location_ids)
+
+    async def _consult_world_for_agents(self, location_ids: set[int], cap: int = 32) -> None:
+        """S82: query the world semantic layer per location and let co-located
+        agents' policies decide what to commit to durable memory."""
+        if not self._world_store or not getattr(self._world_store, "available", False):
+            return
+        import time
+        now = time.time()
+        agents_by_loc: dict[int, list] = {}
+        for a in self.agents.agents:
+            agents_by_loc.setdefault(a.location_id, []).append(a)
+        for loc_id in list(location_ids)[:cap]:
+            loc = self.geography.get_location(loc_id)
+            if not loc:
+                continue
+            hits = await self._world_store.query(loc.name, top_k=5, location_id=loc_id, now=now)
+            if not hits:
+                continue
+            candidates = [
+                {"score": s, "text": t, "domain": m.get("domain"), "location_id": loc_id}
+                for s, t, m in hits
+            ]
+            for a in agents_by_loc.get(loc_id, []):
+                a.consider_world_facts(candidates)
+
     async def _refresh_weather(self) -> None:
         """Refresh weather: fetch live current conditions from Open-Meteo."""
         locations = self._tracked_locations()
@@ -627,7 +693,7 @@ class World:
             if self.agents:
                 result_agents = await session.execute(select(AgentState))
                 existing = {row.id: row for row in result_agents.scalars().all()}
-                persisted_agents = self.agents.to_persisted()
+                persisted_agents = await self.agents.to_persisted_async()
                 active_ids = {item["id"] for item in persisted_agents}
 
                 for agent_payload in persisted_agents:
@@ -658,7 +724,38 @@ class World:
                     if stale_id not in active_ids:
                         await session.delete(stale_row)
 
+            # S76: flush new agent facts to pgvector in the SAME transaction
+            # as agent_state, so durable agent memory commits atomically with
+            # the rest of the knowledge state. Embedding (TEI) happens here in
+            # the async save path, off the tick thread, batched across all
+            # agents into a few chunked calls (not one per agent). Buffers are
+            # cleared only after a successful commit, so a TEI outage or a
+            # failed commit simply retries on the next save instead of losing
+            # facts. Front-drop preserves facts a tick appended mid-save.
+            drain: list[tuple] = []  # (agent, snapshot_len)
+            grouped: list[tuple[str, list[dict]]] = []
+            if self.agents:
+                from agents.fact_store import get_fact_store
+
+                for agent in self.agents.iter_local_agents():
+                    pending = agent.pending_facts
+                    if not pending:
+                        continue
+                    snapshot = list(pending)
+                    grouped.append((agent.agent_id, snapshot))
+                    drain.append((agent, len(snapshot)))
+
+                if grouped:
+                    written = await get_fact_store().add_facts_for_agents(
+                        grouped, session=session
+                    )
+                    if not written:
+                        drain = []  # TEI down — nothing committed, retry next save
+
             await session.commit()
+
+            for agent, snapshot_len in drain:
+                agent.drop_pending_facts(snapshot_len)
 
     async def get_state_summary(self) -> dict:
         """Get a summary of the current world state."""
@@ -731,14 +828,51 @@ class World:
         # Warm the location cache so to_summary() can resolve coordinates
         agent_locs = {a.location_id for a in self.agents.agents}
         await self.geography.warm(agent_locs)
-        return self.agents.summaries(self.geography)
+        return await self.agents.summaries_async(self.geography)
 
     def get_agent(self, agent_id: str) -> dict | None:
         if not self.agents or not self.geography:
             return None
         return self.agents.detail(agent_id, self.geography)
 
+    async def get_agent_async(self, agent_id: str) -> dict | None:
+        """Async agent detail — offloads ray.get in Ray mode (S92)."""
+        if not self.agents or not self.geography:
+            return None
+        return await self.agents.detail_async(agent_id, self.geography)
+
     def ask_agent(self, agent_id: str, question: str) -> dict | None:
         if not self.agents or not self.geography:
             return None
         return self.agents.answer(agent_id, question, self.geography)
+
+    async def ask_agent_async(self, agent_id: str, question: str) -> dict | None:
+        """Async read path (S77) — pgvector-first agent memory retrieval."""
+        if not self.agents or not self.geography:
+            return None
+        return await self.agents.answer_async(agent_id, question, self.geography)
+
+    async def query_world_semantic(
+        self, question: str, top_k: int = 5, location_id: int | None = None, domain: str | None = None
+    ) -> list[dict]:
+        """Semantic-search the world layer over recent civilisation content (S81).
+
+        Returns [{score, text, domain, topic, source, location_id}], excluding
+        documents whose TTL has lapsed."""
+        if not self._world_store or not self._world_store.available:
+            return []
+        import time
+        hits = await self._world_store.query(
+            question, top_k=top_k, location_id=location_id, domain=domain, now=time.time()
+        )
+        return [
+            {
+                "score": round(score, 4),
+                "text": text,
+                "domain": meta.get("domain"),
+                "topic": meta.get("topic"),
+                "source": meta.get("source"),
+                "location_id": None if meta.get("location_id", -1) == -1 else meta.get("location_id"),
+            }
+            for score, text, meta in hits
+        ]

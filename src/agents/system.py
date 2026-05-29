@@ -38,9 +38,18 @@ def _get_retriever() -> SemanticFactRetriever:
 
 
 def _get_chroma_store(agent_id: str) -> ChromaFactStore | None:
-    """Get or create a Chroma fact store for an agent. Returns None if unavailable."""
+    """Get or create a Chroma fact store for an agent. Returns None if unavailable.
+
+    Single choke point for the legacy per-agent Chroma path. When
+    `chroma_enabled` is off (the pgvector cutover — S76/S77 become
+    pgvector-only), this returns None for every caller, so `_append_fact`
+    makes no Chroma writes and `answer` skips the Chroma read branch — taking
+    Chroma fully out of the per-agent hot path. See server-design-plan S99.
+    """
     try:
         from config import settings
+        if not settings.chroma_enabled:
+            return None
         store = ChromaFactStore(agent_id, chroma_host=settings.chroma_host, chroma_port=settings.chroma_port)
         return store if store.available else None
     except Exception:
@@ -274,6 +283,11 @@ class AutonomousAgent:
     _earth_observed_locations: set = field(default_factory=set, init=False, repr=False)
     _chroma_store: ChromaFactStore | None = field(default=None, init=False, repr=False)
     _fact_counter: int = field(default=0, init=False, repr=False)
+    # S76: facts appended since the last successful pgvector flush, plus the
+    # tick they were learned at. Drained transactionally by World._save_state
+    # so embedding happens off the tick thread. Transient — not serialized.
+    _pending_facts: list[dict] = field(default_factory=list, init=False, repr=False)
+    _current_tick_count: int | None = field(default=None, init=False, repr=False)
 
     _BELIEF_PREDICATES = {
         "location_type",
@@ -569,23 +583,53 @@ class AutonomousAgent:
         return places
 
     def answer(self, question: str, geography: Geography) -> dict:
+        """Synchronous read path (Chroma → in-process). Kept for callers that
+        cannot await; the async `answer_async` adds the pgvector path (S77)."""
         q = question.strip()
-        q_lower = q.lower()
         visited_places = self.get_visited_places(geography)
 
+        episodic = self._episodic_answer(q.lower(), question, geography, visited_places)
+        if episodic is not None:
+            return episodic
+
+        memory_records = self._memory_facts(geography)
+        ranked_records, backend = self._retrieve_ranked_sync(q, memory_records)
+        return self._finalize_answer(q, question, ranked_records, backend, visited_places, geography)
+
+    async def answer_async(self, question: str, geography: Geography) -> dict:
+        """Async read path (S77): query pgvector first, fall back to Chroma /
+        in-process. Identical response shape to `answer`."""
+        q = question.strip()
+        visited_places = self.get_visited_places(geography)
+
+        episodic = self._episodic_answer(q.lower(), question, geography, visited_places)
+        if episodic is not None:
+            return episodic
+
+        memory_records = self._memory_facts(geography)
+        ranked_records = await self._retrieve_ranked_pgvector(q, memory_records)
+        if ranked_records:
+            backend = "pgvector"
+        else:
+            ranked_records, backend = self._retrieve_ranked_sync(q, memory_records)
+        return self._finalize_answer(q, question, ranked_records, backend, visited_places, geography)
+
+    def _episodic_answer(
+        self, q_lower: str, question: str, geography: Geography, visited_places: list[dict]
+    ) -> dict | None:
+        """Timeline questions ("recently", "before X") answered from episodic
+        memory — no embedding needed. Returns None for non-episodic queries."""
         if "recent" in q_lower or "lately" in q_lower:
-            text = self._answer_recently(geography)
             return {
                 "agent_id": self.agent_id,
                 "question": question,
-                "answer": text,
+                "answer": self._answer_recently(geography),
                 "visited_places": visited_places,
                 "retrieval_backend": "episodic_timeline",
                 "answer_confidence": 0.9,
                 "answer_certainty": "known",
                 "supporting_facts": self._timeline_supporting_facts(limit=8),
             }
-
         if "before" in q_lower:
             text, support = self._answer_before(question, geography)
             return {
@@ -598,32 +642,65 @@ class AutonomousAgent:
                 "answer_certainty": "known" if support else "uncertain",
                 "supporting_facts": support,
             }
+        return None
 
-        memory_records = self._memory_facts(geography)
-
-        # Try Chroma first (fast vector search, embeddings pre-computed).
-        # Fall back to in-process retriever if Chroma is not available.
+    def _records_from_hits(
+        self, hits: list[tuple[float, str, dict]], memory_records: list[dict]
+    ) -> list[dict]:
+        """Map (score, text, metadata) vector hits onto ranked memory records,
+        reusing the richer in-memory record when the text matches."""
         ranked_records = []
+        for score, text, meta in hits:
+            matching = [r for r in memory_records if r.get("text") == text]
+            record = matching[0] if matching else {
+                "text": text,
+                "predicate": meta.get("predicate", ""),
+                "location_id": meta.get("location_id"),
+            }
+            ranked_records.append({"score": score, "record": record})
+        return ranked_records
+
+    def _retrieve_ranked_sync(
+        self, q: str, memory_records: list[dict]
+    ) -> tuple[list[dict], str]:
+        """Chroma first (pre-computed embeddings), else in-process retriever."""
         if self._chroma_store is None:
             self._chroma_store = _get_chroma_store(self.agent_id)
         if self._chroma_store and self._chroma_store.count > 0:
-            chroma_results = self._chroma_store.query(q, top_k=10)
-            for score, text, meta in chroma_results:
-                matching = [r for r in memory_records if r.get("text") == text]
-                record = matching[0] if matching else {"text": text, "predicate": meta.get("predicate", ""), "location_id": meta.get("location_id")}
-                ranked_records.append({"score": score, "record": record})
-        else:
-            facts = [record["text"] for record in memory_records]
-            retriever = _get_retriever()
-            ranked = retriever.rank(q, facts, top_k=10)
-            ranked_records = [
-                {
-                    "score": float(score),
-                    "record": memory_records[idx],
-                }
-                for score, idx, _ in ranked
-            ]
+            hits = self._chroma_store.query(q, top_k=10)
+            return self._records_from_hits(hits, memory_records), "chroma"
 
+        facts = [record["text"] for record in memory_records]
+        retriever = _get_retriever()
+        ranked = retriever.rank(q, facts, top_k=10)
+        ranked_records = [
+            {"score": float(score), "record": memory_records[idx]}
+            for score, idx, _ in ranked
+        ]
+        return ranked_records, retriever.backend
+
+    async def _retrieve_ranked_pgvector(
+        self, q: str, memory_records: list[dict]
+    ) -> list[dict] | None:
+        """Query the pgvector fact store (S75/S77). Returns None if it has no
+        hits or is unavailable, so the caller can fall back."""
+        from .fact_store import get_fact_store
+
+        hits = await get_fact_store().query(self.agent_id, q, top_k=10)
+        if not hits:
+            return None
+        return self._records_from_hits(hits, memory_records)
+
+    def _finalize_answer(
+        self,
+        q: str,
+        question: str,
+        ranked_records: list[dict],
+        backend: str,
+        visited_places: list[dict],
+        geography: Geography,
+    ) -> dict:
+        """Shared tail: re-rank, compose prose, attach confidence/provenance."""
         # Re-rank: boost earth facts and diversify so basic "I visited X"
         # facts don't drown out richer civilisation knowledge.
         ranked_records = self._rerank_with_diversity(q, ranked_records)
@@ -641,18 +718,15 @@ class AutonomousAgent:
             else:
                 text = "I do not have enough memory yet to answer that."
 
-        backend = "sentence-transformers"
-        if self._chroma_store and self._chroma_store.count > 0:
-            backend = "chroma"
-
+        confidence = self._answer_confidence(ranked_records)
         return {
             "agent_id": self.agent_id,
             "question": question,
             "answer": text,
             "visited_places": visited_places,
             "retrieval_backend": backend,
-            "answer_confidence": self._answer_confidence(ranked_records),
-            "answer_certainty": self._certainty_label(self._answer_confidence(ranked_records)),
+            "answer_confidence": confidence,
+            "answer_certainty": self._certainty_label(confidence),
             "supporting_facts": self._supporting_facts(ranked_records, geography),
         }
 
@@ -899,6 +973,8 @@ class AutonomousAgent:
         return result
 
     def _ingest_observation(self, observation: AgentObservation, tick_count: int | None = None) -> None:
+        if tick_count is not None:
+            self._current_tick_count = tick_count
         loc = observation.current_location
         visit_count = self.knowledge.visit_counts.get(loc.id, 0) + 1
 
@@ -1106,6 +1182,23 @@ class AutonomousAgent:
         if len(self.knowledge.facts) > 5000:
             self.knowledge.facts = self.knowledge.facts[-5000:]
 
+        # S76: buffer for the pgvector write path. Flushed to agent_facts in
+        # the same transaction as agent_state by World._save_state, so the
+        # TEI embedding happens off the tick thread and commits atomically
+        # with the rest of the knowledge state. The Chroma write below stays
+        # in parallel until S78 confirms parity.
+        self._pending_facts.append(
+            {
+                "content": normalized,
+                "location_id": location_id,
+                "tick_count": self._current_tick_count,
+                "metadata": {"predicate": predicate}
+                | ({"value": value} if value is not None else {}),
+            }
+        )
+        if len(self._pending_facts) > 5000:
+            self._pending_facts = self._pending_facts[-5000:]
+
         # Also store in Chroma for fast semantic retrieval (if available).
         # Embedding is computed once here, queries are fast similarity search.
         if self._chroma_store is None:
@@ -1120,6 +1213,45 @@ class AutonomousAgent:
 
         if predicate in self._BELIEF_PREDICATES and location_id is not None and value is not None:
             self._revise_belief(predicate=predicate, location_id=location_id, value=value)
+
+    def consider_world_facts(self, candidates: list[dict], min_score: float = 0.4) -> int:
+        """S82: perception consults the world semantic layer; the policy decides
+        what to commit to durable memory. Commits relevant, novel candidates as
+        facts (→ pgvector via the S76 buffer). Returns how many were committed.
+
+        Policy: relevance above `min_score`, not already known recently. Facts
+        the agent is actively chasing (its goal's location) clear a lower bar."""
+        committed = 0
+        goal_loc = self.current_goal.target_location_id if self.current_goal else None
+        recent_texts = {f.get("text") for f in self.knowledge.facts[-200:]}
+        for c in candidates:
+            text = str(c.get("text", "")).strip()
+            if not text or text in recent_texts:
+                continue
+            threshold = min_score - 0.1 if c.get("location_id") == goal_loc else min_score
+            if float(c.get("score", 0.0)) < threshold:
+                continue
+            self._append_fact(f"world_{c.get('domain') or 'semantic'}", text, c.get("location_id"))
+            recent_texts.add(text)
+            committed += 1
+        return committed
+
+    @property
+    def pending_facts(self) -> list[dict]:
+        """Facts appended since the last successful pgvector flush (S76)."""
+        return self._pending_facts
+
+    def drop_pending_facts(self, count: int) -> None:
+        """Drop the first ``count`` buffered facts after they have been
+        durably committed to pgvector. Dropping from the front (not clearing)
+        preserves any facts appended by a concurrent tick while the async
+        save was awaiting embedding/commit."""
+        if count <= 0:
+            return
+        if count >= len(self._pending_facts):
+            self._pending_facts = []
+        else:
+            self._pending_facts = self._pending_facts[count:]
 
     def _revise_belief(self, predicate: str, location_id: int, value: str | int | float) -> None:
         belief_key = f"{predicate}:{location_id}"
@@ -2208,12 +2340,51 @@ class AgentSystem:
                 return agent.answer(question, geography)
         return None
 
+    async def answer_async(self, agent_id: str, question: str, geography: Geography) -> dict | None:
+        """Async read path (S77) — pgvector-first via AutonomousAgent.answer_async.
+        Ray mode keeps the existing sync remote path (offloaded, S92)."""
+        if self._use_ray:
+            return await asyncio.to_thread(self.answer, agent_id, question, geography)
+        for agent in self.agents:
+            if agent.agent_id.lower() == agent_id.lower():
+                return await agent.answer_async(question, geography)
+        return None
+
+    # S92: in Ray mode `summaries`/`detail`/`to_persisted` call blocking
+    # `ray.get(...)`. Offload to a thread so they never stall the event loop
+    # at scale. In sequential mode they're cheap — call inline, no thread.
+
+    async def summaries_async(self, geography: Geography) -> list[dict]:
+        if self._use_ray:
+            return await asyncio.to_thread(self.summaries, geography)
+        return self.summaries(geography)
+
+    async def detail_async(self, agent_id: str, geography: Geography) -> dict | None:
+        if self._use_ray:
+            return await asyncio.to_thread(self.detail, agent_id, geography)
+        return self.detail(agent_id, geography)
+
+    async def to_persisted_async(self) -> list[dict]:
+        if self._use_ray:
+            return await asyncio.to_thread(self.to_persisted)
+        return self.to_persisted()
+
     def to_persisted(self) -> list[dict]:
         if self._use_ray:
             import ray as _ray
             futures = [a.to_persisted.remote() for a in self._actors]
             return _ray.get(futures)
         return [agent.to_persisted() for agent in self.agents]
+
+    def iter_local_agents(self):
+        """Yield in-process agent objects (sequential mode only).
+
+        Used by the S76 pgvector flush to drain per-agent pending-fact
+        buffers. Ray actors hold their buffers remotely; flushing those is
+        deferred (Ray is gated off below the 10000-agent threshold, S94)."""
+        if self._use_ray:
+            return
+        yield from self.agents
 
     def country_coverage(self, geography: Geography) -> set[str]:
         """Return represented admin_level_1 countries across current agents."""

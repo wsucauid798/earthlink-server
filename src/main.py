@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router as api_router, set_world
-from api.wt import on_tick_wt, start_wt_server, stop_wt_server
+from api.wt import on_tick_wt, start_wt_fanout, start_wt_server, stop_wt_fanout, stop_wt_server
 from db.engine import dispose_engine, engine, async_session
 from db.models import Base
 from world import World
@@ -65,6 +65,9 @@ async def lifespan(app: FastAPI):
     set_world(world)
     if not world.is_running:
         await world.start()
+    # S90: fan out tick broadcasts across WT-serving processes via Redis Streams.
+    # Reuses the EarthProxy Redis connection; no-op (in-process) when Redis is absent.
+    await start_wt_fanout(world.earth_proxy.redis if world.earth_proxy else None)
     await start_wt_server()
 
     logger.info("EarthLink server ready")
@@ -74,6 +77,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if world.is_running:
         await world.pause()
+    await stop_wt_fanout()
     await stop_wt_server()
     if world.earth_proxy:
         await world.earth_proxy.disconnect_redis()

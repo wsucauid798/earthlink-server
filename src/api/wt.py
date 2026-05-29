@@ -3,10 +3,19 @@
 This module runs an aioquic server alongside FastAPI and exposes:
   CONNECT /wt/world  (:protocol = webtransport)
 
-Broadcast model (current spike):
-  - Every world tick is serialized as JSON.
-  - Payload is sent on a dedicated WebTransport unidirectional stream.
-  - Clients read one full JSON message per stream.
+Broadcast topology (S68/S69):
+  - Agent positions ride unreliable WT **datagrams** (latest-wins): a dropped
+    position is harmless because the next tick supersedes it, and datagrams
+    avoid head-of-line blocking entirely.
+  - Everything else rides **independent reliable unidirectional streams, one
+    per event class** (`meta`, `agents`, `world_events`, and the reserved
+    `social_events`/`traces`). A stalled or congested class can't block another
+    because each is its own QUIC stream. Each stream is long-lived and carries a
+    sequence of length-prefixed JSON frames (4-byte big-endian length + body),
+    so a client demuxes per class without re-opening streams every tick.
+
+  The earlier spike sent the whole tick as one JSON blob on a fresh stream per
+  message; that is what S68/S69 replace.
 """
 
 from __future__ import annotations
@@ -15,7 +24,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.utils import formatdate
 from urllib.parse import urlsplit
 from typing import Any, Optional
@@ -23,6 +32,70 @@ from typing import Any, Optional
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# -- S68 stream topology -------------------------------------------------
+#
+# Event classes, each an independent reliable WT stream. Agent positions are
+# NOT here — they go over datagrams (see split_tick).
+CHANNEL_META = "meta"            # world heartbeat: tick, time, rotation, orbital, solar
+CHANNEL_AGENTS = "agents"        # per-agent state deltas (authoritative, reliable)
+CHANNEL_WORLD = "world_events"   # environment refreshes (weather/wind/atmosphere/…)
+CHANNEL_SOCIAL = "social_events" # reserved: dialogue/teaching once the tick surfaces it
+CHANNEL_TRACES = "traces"        # reserved: diagnostic traces
+CHANNELS = (CHANNEL_META, CHANNEL_AGENTS, CHANNEL_WORLD, CHANNEL_SOCIAL, CHANNEL_TRACES)
+
+# Domains whose "<x>_updated" flags, when set, become a world_events payload.
+_WORLD_REFRESH_FLAGS = (
+    "weather_updated",
+    "wind_updated",
+    "atmosphere_updated",
+    "astronomy_updated",
+    "data_feeds_updated",
+)
+
+
+def split_tick(tick_data: dict) -> tuple[dict[str, dict], list[list]]:
+    """Split one world tick into per-channel reliable payloads + position datagrams.
+
+    Returns ``(channels, positions)`` where ``channels`` maps an event class to
+    its JSON payload (classes with nothing to say this tick are omitted) and
+    ``positions`` is a compact latest-wins list ``[[agent_id, lat, lng,
+    location_id], …]`` for agents that moved. Positions are intentionally also
+    reflected in the authoritative ``agents`` stream; the datagram is the fast,
+    lossy path for live map movement, the stream is the reliable record.
+
+    ``social_events``/``traces`` are part of the topology but not emitted yet —
+    dialogue/teaching currently live on agent knowledge, not the tick payload —
+    so they slot in here unchanged once the world tick surfaces them.
+    """
+    tick = tick_data.get("tick")
+    channels: dict[str, dict] = {
+        CHANNEL_META: {
+            "tick": tick,
+            "time": tick_data.get("time"),
+            "rotation": tick_data.get("rotation"),
+            "orbital": tick_data.get("orbital"),
+            "solar_activity": tick_data.get("solar_activity"),
+            "earth_proxy_resolves": tick_data.get("earth_proxy_resolves"),
+        }
+    }
+
+    refreshed = {flag: True for flag in _WORLD_REFRESH_FLAGS if tick_data.get(flag)}
+    if refreshed:
+        channels[CHANNEL_WORLD] = {"tick": tick, **refreshed}
+
+    positions: list[list] = []
+    agent_events = tick_data.get("agent_events") or []
+    for event in agent_events:
+        if event.get("moved") and event.get("lat") is not None and event.get("lng") is not None:
+            positions.append(
+                [event.get("agent_id"), event.get("lat"), event.get("lng"), event.get("location_id")]
+            )
+    if agent_events:
+        channels[CHANNEL_AGENTS] = {"tick": tick, "events": agent_events}
+
+    return channels, positions
 
 
 _aioquic_available = True
@@ -62,15 +135,45 @@ class _WtSession:
     protocol: "WtServerProtocol"
     connection: H3Connection
     session_id: int
+    # One long-lived unidirectional stream per event class, created on first use.
+    _streams: dict[str, int] = field(default_factory=dict)
 
-    def send_json(self, payload: dict[str, Any]) -> None:
+    def _stream_for(self, channel: str) -> int:
+        """Return this session's stream id for an event class, opening it once."""
+        stream_id = self._streams.get(channel)
+        if stream_id is None:
+            stream_id = self.connection.create_webtransport_stream(
+                self.session_id, is_unidirectional=True
+            )
+            self._streams[channel] = stream_id
+        return stream_id
+
+    @staticmethod
+    def _frame(payload: dict[str, Any] | list) -> bytes:
+        """Length-prefixed JSON frame: 4-byte big-endian length + body."""
         raw = json.dumps(payload, default=str).encode("utf-8")
-        stream_id = self.connection.create_webtransport_stream(
-            self.session_id, is_unidirectional=True
-        )
-        # aioquic currently sends WT stream bytes via the underlying QUIC stream API.
-        self.connection._quic.send_stream_data(stream_id, raw, end_stream=True)
+        return len(raw).to_bytes(4, "big") + raw
+
+    def send_event(self, channel: str, payload: dict[str, Any]) -> None:
+        """Append one framed message to the channel's reliable stream."""
+        stream_id = self._stream_for(channel)
+        # aioquic sends WT stream bytes via the underlying QUIC stream API.
+        # end_stream=False keeps the per-class stream open for the next frame.
+        self.connection._quic.send_stream_data(stream_id, self._frame(payload), end_stream=False)
         self.protocol.transmit()
+
+    def send_datagram(self, positions: list) -> None:
+        """Send agent positions over an unreliable WT datagram (latest-wins)."""
+        self.connection.send_datagram(self.session_id, self._frame(positions))
+        self.protocol.transmit()
+
+    def send_tick(self, tick_data: dict[str, Any]) -> None:
+        """Route one world tick across the S68 streams + position datagrams."""
+        channels, positions = split_tick(tick_data)
+        for channel, payload in channels.items():
+            self.send_event(channel, payload)
+        if positions:
+            self.send_datagram(positions)
 
 
 class _WtConnectionManager:
@@ -101,7 +204,7 @@ class _WtConnectionManager:
         stale: list[int] = []
         for session_id, session in list(self._sessions.items()):
             try:
-                session.send_json(payload)
+                session.send_tick(payload)
             except Exception:
                 stale.append(session_id)
         for session_id in stale:
@@ -282,6 +385,54 @@ async def stop_wt_server() -> None:
     logger.info("WebTransport server stopped")
 
 
+# -- S90 Redis-Streams fan-out -------------------------------------------
+#
+# When Redis is available the tick is published once to a stream and every
+# WT-serving process (including this one) serves it via its own consumer; with
+# no Redis we broadcast directly in-process. See api/wt_fanout.py.
+from api.wt_fanout import WtBroadcastConsumer, publish_tick  # noqa: E402
+
+_fanout_redis = None
+_fanout_consumer: Optional[WtBroadcastConsumer] = None
+_fanout_task: Optional[asyncio.Task] = None
+
+
+async def start_wt_fanout(redis) -> None:
+    """Enable Redis-Streams broadcast fan-out. No-op (in-process only) without Redis."""
+    global _fanout_redis, _fanout_consumer, _fanout_task
+    if redis is None:
+        logger.info("WT fan-out disabled — no Redis; broadcasting in-process")
+        return
+    _fanout_redis = redis
+    _fanout_consumer = WtBroadcastConsumer(redis, _manager.broadcast)
+    _fanout_task = asyncio.create_task(_fanout_consumer.run())
+    logger.info("WT fan-out enabled via Redis stream")
+
+
+async def stop_wt_fanout() -> None:
+    global _fanout_redis, _fanout_consumer, _fanout_task
+    if _fanout_consumer is not None:
+        _fanout_consumer.stop()
+    if _fanout_task is not None:
+        _fanout_task.cancel()
+        try:
+            await _fanout_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    _fanout_redis = None
+    _fanout_consumer = None
+    _fanout_task = None
+
+
 async def on_tick_wt(tick_data: dict) -> None:
-    """World tick callback for WT clients."""
+    """World tick callback for WT clients.
+
+    With fan-out enabled, publish once to the stream and let the consumer(s)
+    serve it; if publishing fails, fall back to an in-process broadcast so a
+    transient Redis hiccup never drops a tick for local subscribers.
+    """
+    if _fanout_redis is not None and await publish_tick(_fanout_redis, tick_data):
+        return
     await _manager.broadcast(tick_data)
