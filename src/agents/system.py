@@ -1665,11 +1665,11 @@ class AgentSystem:
             import ray as _ray
             import multiprocessing
 
+            # Limit Ray to half the available CPUs (min 2) so it doesn't
+            # saturate the machine.  Override with RAY_NUM_CPUS env var.
+            default_cpus = max(2, multiprocessing.cpu_count() // 2)
+            num_cpus = int(os.environ.get("RAY_NUM_CPUS", str(default_cpus)))
             if not _ray.is_initialized():
-                # Limit Ray to half the available CPUs (min 2) so it doesn't
-                # saturate the machine.  Override with RAY_NUM_CPUS env var.
-                default_cpus = max(2, multiprocessing.cpu_count() // 2)
-                num_cpus = int(os.environ.get("RAY_NUM_CPUS", str(default_cpus)))
                 _ray.init(
                     num_cpus=num_cpus,
                     ignore_reinit_error=True,
@@ -1681,17 +1681,33 @@ class AgentSystem:
                     f"{_ray.cluster_resources().get('GPU', 0)} GPUs"
                 )
 
+            # S100: batch agents across N≈CPU actors instead of one-per-agent.
+            # N resident processes (not `len(agents)`) keeps memory bounded
+            # while still parallelising the CPU-bound tick; agent state stays
+            # resident in its actor across ticks (no per-tick re-pickling).
+            n_actors = max(1, min(num_cpus, len(self.agents)))
+            batches: list[list] = [[] for _ in range(n_actors)]
+            for i, agent in enumerate(self.agents):
+                batches[i % n_actors].append(agent)
+
             self._actors = []
             self._agent_id_to_actor = {}
-            for i, agent in enumerate(self.agents):
-                actor_seed = seed + i
-                handle = AgentActor.remote(agent.to_persisted(), actor_seed)
+            for b, batch in enumerate(batches):
+                if not batch:
+                    continue
+                # Distinct seed base per actor; per-agent RNGs derive as
+                # base + index inside the actor (batch ≪ 100003, so no overlap).
+                handle = AgentActor.remote([a.to_persisted() for a in batch], seed + b * 100003)
                 self._actors.append(handle)
-                self._agent_id_to_actor[agent.agent_id] = handle
+                for a in batch:
+                    self._agent_id_to_actor[a.agent_id] = handle
 
             self._agent_locations = {a.agent_id: a.location_id for a in self.agents}
             self._use_ray = True
-            logger.info(f"Ray mode active: {len(self._actors)} agent actors created")
+            logger.info(
+                f"Ray mode active: {len(self.agents)} agents across "
+                f"{len(self._actors)} batched actors"
+            )
             return True
 
         except Exception as exc:
@@ -1921,16 +1937,19 @@ class AgentSystem:
         wind_ref = _ray.put(wind)
         facts_ref = _ray.put(earth_facts_map)
 
-        # 3. Fan out tick to all actors — true parallelism
+        # 3. Fan out tick to all actors — true parallelism. Each actor ticks
+        #    its whole batch and returns a list of per-agent events.
         futures = [
             actor.tick.remote(geo_ref, weather_ref, sim_time, tick_count, facts_ref, wind_ref, tick_interval)
             for actor in self._actors
         ]
 
-        # 4. Await results without blocking the event loop
-        events = await asyncio.get_event_loop().run_in_executor(
+        # 4. Await results without blocking the event loop, then flatten the
+        #    per-actor lists into one event list.
+        batched = await asyncio.get_event_loop().run_in_executor(
             None, _ray.get, futures,
         )
+        events = [event for batch in batched for event in batch]
 
         # 5. Update location tracking from results
         for event in events:
@@ -1951,33 +1970,43 @@ class AgentSystem:
         import asyncio
         import ray as _ray
 
-        # Group actors by location
-        by_location: dict[int, list[tuple[str, object]]] = {}
+        # Pull every actor's batch snapshot ONCE, index by agent_id. Cheaper
+        # than the old per-location-per-actor fetch: across all locations we
+        # need every agent's snapshot anyway, and a batched actor returns all
+        # its agents in one call.
+        snapshot_futures = [actor.get_social_snapshot.remote() for actor in self._actors]
+        snapshot_lists = await asyncio.get_event_loop().run_in_executor(
+            None, _ray.get, snapshot_futures,
+        )
+        snapshot_by_id: dict[str, dict] = {
+            snap["agent_id"]: snap for lst in snapshot_lists for snap in lst
+        }
+
+        # Group co-located agents by location.
+        by_location: dict[int, list[str]] = {}
         for agent_id, loc_id in self._agent_locations.items():
-            actor = self._agent_id_to_actor.get(agent_id)
-            if actor is not None:
-                by_location.setdefault(loc_id, []).append((agent_id, actor))
+            by_location.setdefault(loc_id, []).append(agent_id)
 
-        for location_id, group in by_location.items():
-            if len(group) < 2:
+        # Compute exchanges per location; accumulate per-agent updates grouped
+        # by the actor that owns each agent, so each actor gets one push call.
+        updates_by_actor: dict[object, dict[str, dict]] = {}
+        for location_id, agent_ids in by_location.items():
+            snaps = [snapshot_by_id[aid] for aid in agent_ids if aid in snapshot_by_id]
+            if len(snaps) < 2:
                 continue
+            updates = self._compute_social_updates(snaps, location_id, tick_count, sim_time)
+            for snap, update in zip(snaps, updates):
+                actor = self._agent_id_to_actor.get(snap["agent_id"])
+                if actor is not None:
+                    updates_by_actor.setdefault(actor, {})[snap["agent_id"]] = update
 
-            # Pull social snapshots from co-located actors
-            snapshot_futures = [actor.get_social_snapshot.remote() for _, actor in group]
-            snapshots = await asyncio.get_event_loop().run_in_executor(
-                None, _ray.get, snapshot_futures,
-            )
-
-            # Compute social updates for each agent
-            updates = self._compute_social_updates(
-                snapshots, location_id, tick_count, sim_time,
-            )
-
-            # Push updates back to actors
-            update_futures = [
-                actor.apply_social_update.remote(updates[i])
-                for i, (_, actor) in enumerate(group)
-            ]
+        # Push updates back — one call per actor that had any exchange.
+        update_futures = [
+            actor.apply_social_updates.remote(by_id)
+            for actor, by_id in updates_by_actor.items()
+            if by_id
+        ]
+        if update_futures:
             await asyncio.get_event_loop().run_in_executor(
                 None, _ray.get, update_futures,
             )
@@ -2300,23 +2329,29 @@ class AgentSystem:
             import ray as _ray
             geo_ref = _ray.put(geography)
             futures = [a.get_summary.remote(geo_ref) for a in self._actors]
-            return _ray.get(futures)
+            # Each actor returns a list of summaries (its batch) — flatten.
+            return [summary for batch in _ray.get(futures) for summary in batch]
         return [agent.to_summary(geography) for agent in self.agents]
+
+    def _resolve_actor(self, agent_id: str):
+        """(actor, resolved_id) for the batched actor owning agent_id, or
+        (None, agent_id). Falls back to a case-insensitive id match."""
+        actor = self._agent_id_to_actor.get(agent_id)
+        if actor is not None:
+            return actor, agent_id
+        for aid, act in self._agent_id_to_actor.items():
+            if aid.lower() == agent_id.lower():
+                return act, aid
+        return None, agent_id
 
     def detail(self, agent_id: str, geography: Geography) -> dict | None:
         if self._use_ray:
             import ray as _ray
-            actor = self._agent_id_to_actor.get(agent_id)
-            if actor is None:
-                # Case-insensitive lookup
-                for aid, act in self._agent_id_to_actor.items():
-                    if aid.lower() == agent_id.lower():
-                        actor = act
-                        break
+            actor, resolved = self._resolve_actor(agent_id)
             if actor is None:
                 return None
             geo_ref = _ray.put(geography)
-            return _ray.get(actor.get_detail.remote(geo_ref))
+            return _ray.get(actor.get_detail.remote(resolved, geo_ref))
         for agent in self.agents:
             if agent.agent_id.lower() == agent_id.lower():
                 return agent.to_detail(geography)
@@ -2325,16 +2360,11 @@ class AgentSystem:
     def answer(self, agent_id: str, question: str, geography: Geography) -> dict | None:
         if self._use_ray:
             import ray as _ray
-            actor = self._agent_id_to_actor.get(agent_id)
-            if actor is None:
-                for aid, act in self._agent_id_to_actor.items():
-                    if aid.lower() == agent_id.lower():
-                        actor = act
-                        break
+            actor, resolved = self._resolve_actor(agent_id)
             if actor is None:
                 return None
             geo_ref = _ray.put(geography)
-            return _ray.get(actor.answer.remote(question, geo_ref))
+            return _ray.get(actor.answer.remote(resolved, question, geo_ref))
         for agent in self.agents:
             if agent.agent_id.lower() == agent_id.lower():
                 return agent.answer(question, geography)
@@ -2373,7 +2403,8 @@ class AgentSystem:
         if self._use_ray:
             import ray as _ray
             futures = [a.to_persisted.remote() for a in self._actors]
-            return _ray.get(futures)
+            # Each actor returns its batch as a list — flatten.
+            return [p for batch in _ray.get(futures) for p in batch]
         return [agent.to_persisted() for agent in self.agents]
 
     def iter_local_agents(self):

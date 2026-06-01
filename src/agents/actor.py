@@ -1,8 +1,13 @@
 """Ray actor wrapper for AutonomousAgent.
 
-Each agent runs as an independent Ray actor — true parallel ticking.
-Geography and Weather are shared via Ray's object store (zero-copy on same node).
-The AgentSystem coordinator fans out tick() calls and handles social learning.
+Each actor owns a **batch** of agents (not one), so N≈cores actors cover the
+whole population with true multi-process parallelism while staying inside the
+VPS memory budget — 1000 single-agent actors (~150–250 MB each) OOM a 24 GB
+host (S94), whereas ~N batched actors hold all agents in N resident processes.
+State stays inside the actor across ticks (no per-tick re-pickling), unlike a
+ProcessPoolExecutor. Geography and Weather are shared via Ray's object store
+(zero-copy on same node). The AgentSystem coordinator fans out tick() calls and
+handles social learning. See server-design-plan S100.
 
 Falls back gracefully to sequential mode if Ray is unavailable.
 """
@@ -28,17 +33,28 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 class _AgentActorImpl:
-    """A single autonomous agent running as a Ray actor.
+    """A batch of autonomous agents running as one Ray actor.
 
-    The actor owns the AutonomousAgent instance. All state mutations happen
-    here. The coordinator (AgentSystem) sends tick parameters and collects
-    results via remote calls.
+    The actor owns several AutonomousAgent instances (keyed by agent_id) and
+    ticks them in-process. All state mutations happen here; the coordinator
+    (AgentSystem) sends tick parameters and collects per-agent results via
+    remote calls. Per-agent methods (`get_detail`, `answer`,
+    `apply_social_update`) address an agent within the batch by id.
     """
 
-    def __init__(self, agent_persisted: dict, seed: int):
+    def __init__(self, batch_persisted: list[dict], seed: int):
         from agents.system import AutonomousAgent
-        self._agent = AutonomousAgent.from_persisted(agent_persisted)
-        self._rng = random.Random(seed)
+        # Preserve order for stable iteration; index by id for addressed calls.
+        self._agents = [AutonomousAgent.from_persisted(p) for p in batch_persisted]
+        self._by_id = {a.agent_id: a for a in self._agents}
+        # One RNG per agent, deterministically derived from the actor seed and
+        # the agent's position in the batch — keeps decisions reproducible and
+        # independent across agents (mirrors the sequential per-agent RNG).
+        self._rngs = {a.agent_id: random.Random(seed + i) for i, a in enumerate(self._agents)}
+
+    @property
+    def agent_ids(self) -> list[str]:
+        return [a.agent_id for a in self._agents]
 
     # --- Core tick --------------------------------------------------------
 
@@ -51,8 +67,8 @@ class _AgentActorImpl:
         earth_facts_map: dict,
         wind=None,
         tick_interval: float = 1.0,
-    ) -> dict:
-        """Run one full agent tick: perceive → decide → act → learn.
+    ) -> list[dict]:
+        """Tick every agent in the batch; return one event dict per agent.
 
         Args:
             geography: Geography object (resolved from ObjectRef).
@@ -60,23 +76,33 @@ class _AgentActorImpl:
             sim_time: Current simulation datetime.
             tick_count: World tick counter.
             earth_facts_map: {location_id: [EarthFact, ...]} for all
-                resolved locations. The actor looks up facts for its
+                resolved locations. Each agent looks up facts for its
                 current and post-move locations.
             wind: Wind object (resolved from ObjectRef), or None.
 
         Returns:
-            Event dict for this tick.
+            List of per-agent event dicts (batch order).
         """
-        agent = self._agent
+        return [
+            self._tick_one(
+                agent, geography, weather, sim_time, tick_count, earth_facts_map, wind, tick_interval,
+            )
+            for agent in self._agents
+        ]
+
+    def _tick_one(
+        self, agent, geography, weather, sim_time, tick_count, earth_facts_map, wind, tick_interval,
+    ) -> dict:
+        rng = self._rngs[agent.agent_id]
 
         # Pre-move perception with earth facts for current location
         current_earth_facts = earth_facts_map.get(agent.location_id, [])
         observation = agent.perceive(
             geography, weather, sim_time, earth_facts=current_earth_facts, wind=wind,
         )
-        agent.refresh_goal(observation, geography, self._rng)
+        agent.refresh_goal(observation, geography, rng)
         next_location = agent.choose_next_location(
-            observation, geography, weather, self._rng,
+            observation, geography, weather, rng,
         )
         previous_location = agent.location_id
         agent.apply_action(next_location, geography, tick_interval_seconds=tick_interval)
@@ -107,32 +133,29 @@ class _AgentActorImpl:
 
     # --- Read-only queries ------------------------------------------------
 
-    def get_agent_id(self) -> str:
-        return self._agent.agent_id
+    def get_summary(self, geography) -> list[dict]:
+        """Summaries for every agent in the batch."""
+        return [agent.to_summary(geography) for agent in self._agents]
 
-    def get_location_id(self) -> int:
-        return self._agent.location_id
+    def get_detail(self, agent_id: str, geography) -> dict | None:
+        agent = self._by_id.get(agent_id)
+        return agent.to_detail(geography) if agent is not None else None
 
-    def get_summary(self, geography) -> dict:
-        return self._agent.to_summary(geography)
+    def answer(self, agent_id: str, question: str, geography) -> dict | None:
+        agent = self._by_id.get(agent_id)
+        return agent.answer(question, geography) if agent is not None else None
 
-    def get_detail(self, geography) -> dict:
-        return self._agent.to_detail(geography)
-
-    def answer(self, question: str, geography) -> dict:
-        return self._agent.answer(question, geography)
-
-    def to_persisted(self) -> dict:
-        return self._agent.to_persisted()
+    def to_persisted(self) -> list[dict]:
+        """Persisted state for every agent in the batch."""
+        return [agent.to_persisted() for agent in self._agents]
 
     # --- Social learning interface ----------------------------------------
 
-    def get_social_snapshot(self) -> dict:
-        """Return data needed by the coordinator for social learning.
+    def get_social_snapshot(self) -> list[dict]:
+        """Social-learning snapshots for every agent in the batch."""
+        return [self._snapshot_one(agent) for agent in self._agents]
 
-        Kept lean — only the slices the social algorithms need.
-        """
-        agent = self._agent
+    def _snapshot_one(self, agent) -> dict:
         return {
             "agent_id": agent.agent_id,
             "name": agent.name,
@@ -157,10 +180,12 @@ class _AgentActorImpl:
             "interaction_network": {k: dict(v) for k, v in agent.knowledge.interaction_network.items()},
         }
 
-    def apply_social_update(self, update: dict) -> None:
-        """Apply social learning updates computed by the coordinator.
+    def apply_social_updates(self, updates_by_id: dict[str, dict]) -> None:
+        """Apply social-learning updates to the batch's agents.
 
-        The update dict has keys:
+        ``updates_by_id`` maps ``agent_id`` → an update dict for the agents in
+        this actor that participated in an exchange (agents with no exchange
+        this tick are simply absent). Each update dict has keys:
             new_facts:             list[dict] — facts to append
             belief_updates:        dict[key, belief_dict] — beliefs to set/merge
             belief_conflicts:      list[dict] — conflicts to append
@@ -174,7 +199,12 @@ class _AgentActorImpl:
             learning_requests:     list[dict] — learning requests to append (A58)
             interaction_network:   dict[agent_id, network_record] — network data to merge (A59)
         """
-        agent = self._agent
+        for agent_id, update in updates_by_id.items():
+            agent = self._by_id.get(agent_id)
+            if agent is not None:
+                self._apply_one_update(agent, update)
+
+    def _apply_one_update(self, agent, update: dict) -> None:
         knowledge = agent.knowledge
 
         # Append new facts
