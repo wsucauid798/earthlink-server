@@ -635,3 +635,68 @@ async def configure_simulation(config: SimulationConfigSchema):
         "config": world.config.model_dump(),
         "time": world.time.to_dict(),
     }
+
+
+# --- Social graph (Apache AGE, S88) ---
+# Read-only Cypher analytics over the `earthlink_social` graph (S87), plus an
+# on-demand populate from live agent social state. The populate is deliberately
+# explicit (not on the tick/save loop) so graph maintenance never sits on the
+# simulation hot path. social_graph is imported lazily so a missing/old DB
+# (no AGE) degrades these endpoints only, not the whole API.
+
+@router.post("/social-graph/sync")
+async def social_graph_sync():
+    """Populate the AGE social graph from current agent social state (on-demand)."""
+    from world import social_graph
+
+    world = get_world()
+    if not world.agents:
+        raise HTTPException(status_code=503, detail="Agents not loaded")
+    try:
+        return await social_graph.populate_from_agents(list(world.agents.agents))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"social graph sync failed: {exc}")
+
+
+@router.get("/social-graph/centrality")
+async def social_graph_centrality(limit: int = Query(20, ge=1, le=500)):
+    """Degree-centrality ranking of agents in the social graph."""
+    from world import social_graph
+
+    try:
+        return await social_graph.degree_centrality(limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"centrality query failed: {exc}")
+
+
+@router.get("/social-graph/path")
+async def social_graph_path(
+    source: str = Query(..., description="Source agent_id"),
+    target: str = Query(..., description="Target agent_id"),
+    max_hops: int = Query(6, ge=1, le=15),
+):
+    """Shortest belief-transmission path (via TAUGHT edges) from source to target."""
+    from world import social_graph
+
+    try:
+        path = await social_graph.belief_path(source, target, max_hops=max_hops)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"path query failed: {exc}")
+    if path is None:
+        raise HTTPException(status_code=404, detail="No belief-transmission path found")
+    return path
+
+
+@router.get("/social-graph/communities")
+async def social_graph_communities():
+    """Communities over INTERACTED_WITH edges. AGE has no built-in modularity
+    clustering, so this is a connected-components approximation."""
+    from world import social_graph
+
+    try:
+        return {
+            "method": "connected_components",
+            "communities": await social_graph.communities(),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"communities query failed: {exc}")

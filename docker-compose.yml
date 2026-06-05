@@ -1,10 +1,18 @@
 services:
   db:
-    # pgvector/pgvector:pg17 = stock PG 17 + the vector extension preinstalled,
-    # required by migration c5e7a09f8b21 (CREATE EXTENSION vector). Data layout
-    # is wire-compatible with postgres:17, so the existing pgdata volume is
-    # reused without reinit (matches prod, S73).
-    image: pgvector/pgvector:pg17
+    # Custom image (../vps-setup/Dockerfile.db): pgvector/pgvector:pg17 (the
+    # image prod already runs) + TimescaleDB + Apache AGE, so all three
+    # extensions the app uses live in one image — `vector` (c5e7a09f8b21),
+    # `timescaledb` (e1a4d7c93f52 / S83), `age` (a7e2c4f86d31 / S86). Same base
+    # ⇒ same PGDATA (/var/lib/postgresql/data) and uid ⇒ true drop-in over the
+    # existing volume. Built locally like Dockerfile.caddy.
+    build:
+      context: ../vps-setup
+      dockerfile: Dockerfile.db
+    image: earthlink/db:age
+    # TimescaleDB must be preloaded; set here so it applies to the pre-existing
+    # data dir (initdb does not re-run on an existing volume). AGE loads on demand.
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
     environment:
       POSTGRES_USER: earthlink
       POSTGRES_PASSWORD: earthlink

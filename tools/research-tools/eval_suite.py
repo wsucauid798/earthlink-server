@@ -1053,6 +1053,101 @@ def save_scenario_data(result: ScenarioResult, out: Path) -> None:
                 )
 
 
+# ===================== TimescaleDB telemetry (S85) =========================
+
+def _epoch_to_dt(epoch: float):
+    """Epoch seconds -> tz-aware UTC datetime (TIMESTAMPTZ-friendly)."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(float(epoch), tz=timezone.utc)
+
+
+def _iso_to_dt(iso: str, fallback_epoch: float):
+    """Best-effort ISO-8601 -> datetime; falls back to an epoch on parse error."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return _epoch_to_dt(fallback_epoch)
+
+
+async def write_telemetry_to_hypertables(result: ScenarioResult, dsn: str) -> None:
+    """S85 — write one scenario's tick-level telemetry into the TimescaleDB
+    hypertables created by migration f2b8e6d04a19 (tick_metrics, agent_events,
+    adapter_latencies). NDJSON/CSV export (save_scenario_data) is unchanged and
+    remains the read-only artifact; this is an additional sink, opt-in via
+    --db-url / EARTHLINK_EVAL_DB_URL.
+
+    social_events is intentionally NOT written here: that data lives only inside
+    the live server's social-learning step and is not exposed on
+    /api/eval/snapshot, so eval_suite has no source for it (server-side
+    follow-up). Writes degrade loudly — a connection/insert failure is logged
+    and re-raised so a misconfigured DSN is visible, not silently swallowed.
+    """
+    import asyncpg  # lazy: only required when --db-url is used
+
+    tick_rows = []
+    adapter_rows = []
+    for s in result.snapshots:
+        ts = _epoch_to_dt(s.wall_time)
+        ks = [a.get("knowledge_score") for a in s.agents if a.get("knowledge_score") is not None]
+        es = [a.get("energy") for a in s.agents if a.get("energy") is not None]
+        ep = s.earth_proxy or {}
+        tick_rows.append((
+            ts, int(s.tick), None, len(s.agents),
+            None,  # location_count not in snapshot
+            ep.get("total_resolves"),
+            None,  # is_running not per-snapshot here
+            (sum(ks) / len(ks)) if ks else None,
+            (sum(es) / len(es)) if es else None,
+        ))
+        for name, st in (ep.get("adapters") or {}).items():
+            adapter_rows.append((
+                ts, str(name), st.get("avg_latency_ms"),
+                st.get("calls"), st.get("timeouts"), st.get("rate_limited"),
+            ))
+
+    agent_rows = []
+    for t in result.ticks:
+        ts = _iso_to_dt(t.wall_time, time.time())
+        for ev in t.agent_events:
+            goal = ev.get("goal")
+            agent_rows.append((
+                ts, int(t.tick), str(ev.get("agent_id")),
+                ev.get("action"), ev.get("from_location_id"), ev.get("to_location_id"),
+                ev.get("moved"), ev.get("distance_km"), ev.get("knowledge_score"),
+                ev.get("reward"), ev.get("q_value"), ev.get("energy"),
+                json.dumps(goal) if goal is not None else None,
+            ))
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        await conn.executemany(
+            "INSERT INTO tick_metrics (time, tick_count, tick_wall_ms, agent_count, "
+            "location_count, total_resolves, is_running, avg_knowledge, avg_energy) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            tick_rows,
+        )
+        await conn.executemany(
+            "INSERT INTO adapter_latencies (time, adapter_name, avg_latency_ms, "
+            "call_count, timeouts, rate_limited) VALUES ($1,$2,$3,$4,$5,$6)",
+            adapter_rows,
+        )
+        await conn.executemany(
+            "INSERT INTO agent_events (time, tick_count, agent_id, action, "
+            "from_location_id, to_location_id, moved, distance_km, knowledge_score, "
+            "reward, q_value, energy, goal) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)",
+            agent_rows,
+        )
+    finally:
+        await conn.close()
+
+    print(
+        f"  [S85] wrote telemetry to TimescaleDB: {len(tick_rows)} tick_metrics, "
+        f"{len(agent_rows)} agent_events, {len(adapter_rows)} adapter_latencies"
+    )
+
+
 # ============================= Main =========================================
 
 async def main() -> None:
@@ -1122,6 +1217,14 @@ async def main() -> None:
         "--no-snapshots",
         action="store_true",
         help="Do not persist snapshots.ndjson (keeps artifacts smaller but prevents full chart backfill).",
+    )
+    parser.add_argument(
+        "--db-url",
+        default=os.environ.get("EARTHLINK_EVAL_DB_URL"),
+        help="S85: if set, also write tick-level telemetry to the TimescaleDB "
+             "hypertables (postgresql://user:pass@host:port/db). Off by default — "
+             "NDJSON/CSV artifacts are unaffected. Requires the schema migrated "
+             "(alembic upgrade head) and the asyncpg package.",
     )
     args = parser.parse_args()
 
@@ -1223,6 +1326,8 @@ async def main() -> None:
 
         if WRITE_DATA:
             save_scenario_data(result, scenario_dir)
+        if args.db_url:
+            await write_telemetry_to_hypertables(result, args.db_url)
         chart_tick_cadence(result, scenario_dir)
         chart_knowledge_growth(agg, scenario_dir, suffix)
         chart_exploration_frontier(agg, agent_series, scenario_dir, suffix)
