@@ -102,6 +102,10 @@ class Weather:
     _refresh_count: int = 0
     _refresh_failures: int = 0
 
+    # When each location's weather was last fetched from Open-Meteo (UTC).
+    # Drives the on-demand TTL in resolve().
+    _fetched_at: dict[int, datetime] = field(default_factory=dict)
+
     @property
     def last_refresh(self) -> datetime | None:
         """When weather was last refreshed from Open-Meteo (UTC), or None."""
@@ -119,6 +123,43 @@ class Weather:
     def get_all_weather(self) -> dict[int, WeatherState]:
         """Get current weather for all locations."""
         return dict(self._current)
+
+    async def resolve(
+        self,
+        location_id: int,
+        lat: float,
+        lng: float,
+        ttl_seconds: int = 3600,
+    ) -> WeatherState | None:
+        """On-demand weather for ANY location.
+
+        Returns cached conditions if they were fetched within ``ttl_seconds``;
+        otherwise fetches live from Open-Meteo, caches, and returns them. This
+        is what makes weather resolve *per place* — including locations outside
+        the scheduled set. Never raises: on a fetch failure it returns the last
+        cached value (or None), so callers/agents degrade gracefully.
+        """
+        now = datetime.now(timezone.utc)
+        cached = self._current.get(location_id)
+        fetched_at = self._fetched_at.get(location_id)
+        if (
+            cached is not None
+            and fetched_at is not None
+            and (now - fetched_at).total_seconds() < ttl_seconds
+        ):
+            return cached
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                state = await self._fetch_current(client, location_id, lat, lng)
+            if state is not None:
+                self._current[location_id] = state
+                self._fetched_at[location_id] = now
+                return state
+        except Exception as e:
+            logger.warning(
+                f"On-demand weather resolve failed for location {location_id}: {e}"
+            )
+        return cached
 
     async def refresh(self, locations: list[tuple[int, float, float]]) -> int:
         """Fetch current weather from Open-Meteo for tracked locations.
@@ -139,6 +180,7 @@ class Weather:
                     state = await self._fetch_current(client, loc_id, lat, lng)
                     if state:
                         self._current[loc_id] = state
+                        self._fetched_at[loc_id] = datetime.now(timezone.utc)
                         refreshed += 1
                 except Exception as e:
                     logger.warning(f"Weather refresh failed for location {loc_id}: {e}")

@@ -257,7 +257,7 @@ async def get_weather(location_id: int):
     if not loc:
         raise HTTPException(status_code=404, detail="Location not found")
 
-    ws = world.weather.get_weather(location_id)
+    ws = await world.weather.resolve(location_id, loc.lat, loc.lng)
     if not ws:
         return None
 
